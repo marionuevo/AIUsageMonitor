@@ -182,9 +182,12 @@ enum UsageReader {
             } else if line.hasPrefix("What's contributing") {
                 inContributing = true
             } else if inContributing {
-                // Skip the small-print caveat, keep the figures.
+                // Skip the small-print caveat, keep the figures. The leading
+                // whitespace is kept: it is what sets the bullets under their
+                // heading once they are menu rows.
                 if line.hasPrefix("Approximate,") { continue }
-                report.contributing.append(line)
+                report.contributing.append(
+                    rawLine.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression))
             }
         }
         return report
@@ -388,7 +391,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if !report.contributing.isEmpty {
                 menu.addItem(.separator())
-                for line in report.contributing { menu.addItem(info(line, small: true)) }
+                for line in report.contributing { menu.addItem(info(line)) }
             }
         }
 
