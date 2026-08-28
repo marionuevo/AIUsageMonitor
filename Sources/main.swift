@@ -196,22 +196,26 @@ enum UsageReader {
 enum Bar {
     static let width = 10
 
-    static func render(_ percent: Int) -> String {
+    static func filledCount(_ percent: Int) -> Int {
         let filled = max(0, min(width, Int((Double(percent) / 100.0 * Double(width)).rounded())))
         // Round up so any non-zero usage shows at least one block.
-        let shown = (percent > 0 && filled == 0) ? 1 : filled
+        return (percent > 0 && filled == 0) ? 1 : filled
+    }
+
+    static func render(_ percent: Int) -> String {
+        let shown = filledCount(percent)
         return String(repeating: "█", count: shown) + String(repeating: "░", count: width - shown)
     }
 }
 
+/// Anything under the threshold is just information and reads in the system's
+/// own label colour, which follows light and dark mode. Past it, the number is
+/// news, and only then does it take a colour.
+let alertThreshold = 85
+
 extension NSColor {
-    /// Green below 60%, amber approaching the limit, red once it is close.
     static func forUsage(_ percent: Int) -> NSColor {
-        switch percent {
-        case ..<60:  return .systemGreen
-        case ..<85:  return .systemOrange
-        default:     return .systemRed
-        }
+        percent > alertThreshold ? .systemRed : .labelColor
     }
 }
 
@@ -245,6 +249,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        // Rows with no action are informational, not disabled; without this
+        // AppKit greys them out until they are barely legible.
+        menu.autoenablesItems = false
         statusItem.menu = menu
 
         updateButton()
@@ -368,7 +375,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let headline = report.headline {
                 menu.addItem(info(headline.replacingOccurrences(
                     of: "You are currently using your subscription to power your Claude Code usage",
-                    with: "Claude Code · subscription")))
+                    with: "Claude Code · subscription"), small: true, muted: true))
                 menu.addItem(.separator())
             }
 
@@ -448,26 +455,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let padded = label.padding(toLength: max(20, label.count + 1), withPad: " ", startingAt: 0)
         let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
 
-        let text = NSMutableAttributedString(string: padded, attributes: [.font: font])
-        text.append(NSAttributedString(string: Bar.render(limit.percent), attributes: [
+        let filled = Bar.filledCount(limit.percent)
+        let text = NSMutableAttributedString(string: padded, attributes: [
+            .font: font, .foregroundColor: NSColor.labelColor,
+        ])
+        text.append(NSAttributedString(string: String(repeating: "█", count: filled), attributes: [
             .font: font, .foregroundColor: NSColor.forUsage(limit.percent),
         ]))
-        text.append(NSAttributedString(string: String(format: " %3d%%", limit.percent), attributes: [.font: font]))
+        text.append(NSAttributedString(string: String(repeating: "░", count: Bar.width - filled), attributes: [
+            .font: font, .foregroundColor: NSColor.tertiaryLabelColor,
+        ]))
+        text.append(NSAttributedString(string: String(format: " %3d%%", limit.percent), attributes: [
+            .font: font, .foregroundColor: NSColor.forUsage(limit.percent),
+        ]))
 
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.attributedTitle = text
-        item.isEnabled = false
         return item
     }
 
-    private func info(_ text: String, small: Bool = false) -> NSMenuItem {
+    /// Hierarchy in the menu comes from type size, not from washed-out colour:
+    /// every row stays at full label contrast in both light and dark mode.
+    private func info(_ text: String, small: Bool = false, muted: Bool = false) -> NSMenuItem {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
         let size = small ? NSFont.smallSystemFontSize : NSFont.systemFontSize
         item.attributedTitle = NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: size),
-            .foregroundColor: small ? NSColor.secondaryLabelColor : NSColor.labelColor,
+            .foregroundColor: muted ? NSColor.secondaryLabelColor : NSColor.labelColor,
         ])
-        item.isEnabled = false
         return item
     }
 

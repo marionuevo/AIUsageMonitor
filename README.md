@@ -13,8 +13,9 @@ A tiny macOS menu bar app that keeps your Claude Code limits in sight. It runs
        alt="ClaudeUsage in the macOS menu bar: a gauge icon followed by the session and weekly usage percentages">
 </p>
 
-The percentage is colour-coded — green below 60%, amber to 85%, red above — so a
-sideways glance is enough to tell you whether the session is about to run out.
+The number sits in the system's own label colour, so it reads like every other menu bar
+item in both light and dark mode. It turns red only past 85% — the one moment the number
+is actually news.
 
 ## Why
 
