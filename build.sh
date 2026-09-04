@@ -6,6 +6,15 @@ cd "$(dirname "$0")"
 
 APP="build/ClaudeUsage.app"
 MIN_OS="13.0"
+SDK_PATH="$(xcrun --show-sdk-path)"
+# Command Line Tools updates can briefly leave the unversioned SDK newer than
+# the active Swift compiler. Prefer the known-compatible versioned SDK then.
+if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk ]; then
+  SDK_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk
+fi
+export SDKROOT="$SDK_PATH"
+export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/claudeusage-clang-cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="${TMPDIR:-/tmp}/claudeusage-swift-cache"
 
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

@@ -5,6 +5,12 @@ import ServiceManagement
 
 private let displayModeKey = "ClaudeUsageDisplayMode"
 private let refreshMinutesKey = "ClaudeUsageRefreshMinutes"
+private let selectedServiceKey = "ClaudeUsageSelectedService"
+
+enum Service: String, CaseIterable {
+    case claude = "Claude"
+    case codex = "Codex"
+}
 
 enum DisplayMode: String, CaseIterable {
     case session, week, both, iconOnly
@@ -45,6 +51,23 @@ struct Report {
 enum State {
     case loading
     case ready(Report)
+    case failed(String)
+}
+
+struct CodexReport {
+    var limits: [Limit]
+    var plan: String?
+    var credits: String?
+    var raw: String
+    var fetchedAt = Date()
+
+    var sessionLimit: Limit? { limits.first }
+    var weekLimit: Limit? { limits.dropFirst().first }
+}
+
+enum CodexState {
+    case loading
+    case ready(CodexReport)
     case failed(String)
 }
 
@@ -194,6 +217,138 @@ enum UsageReader {
     }
 }
 
+// MARK: - Reading Codex limits
+
+/// Codex exposes the same rate-limit snapshot used by its own UI through its
+/// local app-server protocol. The CLI remains responsible for authentication;
+/// this app never opens or parses the credentials file.
+enum CodexReader {
+    private static let candidates = [
+        "\(NSHomeDirectory())/.local/bin/codex",
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+    ]
+
+    static func locateCLI() -> String? {
+        let fm = FileManager.default
+        if let found = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) { return found }
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        shell.arguments = ["-lc", "command -v codex"]
+        let pipe = Pipe()
+        shell.standardOutput = pipe
+        shell.standardError = FileHandle.nullDevice
+        guard (try? shell.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        shell.waitUntilExit()
+        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return fm.isExecutableFile(atPath: path) ? path : nil
+    }
+
+    static func fetch(completion: @escaping (Result<CodexReport, UsageError>) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            let result = fetchSynchronously()
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    private static func fetchSynchronously() -> Result<CodexReport, UsageError> {
+        guard let cli = locateCLI() else {
+            return .failure(UsageError(message: "Could not find the `codex` command."))
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["app-server", "--stdio"]
+        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = ["\(NSHomeDirectory())/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
+                               "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
+        environment["HOME"] = NSHomeDirectory()
+        process.environment = environment
+
+        let input = Pipe(), output = Pipe(), error = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+        do { try process.run() }
+        catch { return .failure(UsageError(message: "Could not run Codex: \(error.localizedDescription)")) }
+
+        let requests = [
+            #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"claude-usage","version":"1"},"capabilities":{"experimentalApi":true}}}"#,
+            #"{"method":"initialized"}"#,
+            #"{"id":2,"method":"account/rateLimits/read","params":null}"#,
+        ].joined(separator: "\n") + "\n"
+        input.fileHandleForWriting.write(Data(requests.utf8))
+
+        let deadline = Date().addingTimeInterval(20)
+        var buffer = Data()
+        var response: [String: Any]?
+        while Date() < deadline && process.isRunning && response == nil {
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 10) {
+                let line = buffer[..<newline]
+                buffer.removeSubrange(...newline)
+                guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                      (object["id"] as? NSNumber)?.intValue == 2 else { continue }
+                response = object
+                break
+            }
+        }
+        if process.isRunning { process.terminate() }
+
+        guard let response else {
+            let message = String(decoding: error.fileHandleForReading.availableData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return .failure(UsageError(message: message.isEmpty ? "Codex did not return usage information." : message))
+        }
+        if let rpcError = response["error"] as? [String: Any] {
+            return .failure(UsageError(message: rpcError["message"] as? String ?? "Codex usage request failed."))
+        }
+        guard let result = response["result"] as? [String: Any],
+              let snapshot = result["rateLimits"] as? [String: Any] else {
+            return .failure(UsageError(message: "Codex returned an unfamiliar usage response."))
+        }
+
+        var limits: [Limit] = []
+        if let primary = snapshot["primary"] as? [String: Any] {
+            limits.append(limit(from: primary, fallbackLabel: "5-hour limit"))
+        }
+        if let secondary = snapshot["secondary"] as? [String: Any] {
+            limits.append(limit(from: secondary, fallbackLabel: "Weekly limit"))
+        }
+        guard !limits.isEmpty else {
+            return .failure(UsageError(message: "No Codex rate limits were returned. Are you signed in?"))
+        }
+        let plan = snapshot["planType"] as? String
+        let creditsObject = snapshot["credits"] as? [String: Any]
+        let credits = creditsObject?["balance"] as? String
+        let rawData = (try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        return .success(CodexReport(limits: limits, plan: plan, credits: credits,
+                                    raw: String(decoding: rawData, as: UTF8.self)))
+    }
+
+    private static func limit(from object: [String: Any], fallbackLabel: String) -> Limit {
+        let percent = (object["usedPercent"] as? NSNumber)?.intValue ?? 0
+        let minutes = (object["windowDurationMins"] as? NSNumber)?.intValue
+        let label: String
+        if let minutes, minutes == 300 { label = "5-hour limit" }
+        else if let minutes, minutes == 10_080 { label = "Weekly limit" }
+        else if let minutes { label = "\(minutes)-minute limit" }
+        else { label = fallbackLabel }
+        let reset = (object["resetsAt"] as? NSNumber).map {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            return formatter.string(from: Date(timeIntervalSince1970: $0.doubleValue))
+        }
+        return Limit(label: label, percent: percent, reset: reset)
+    }
+}
+
 // MARK: - Rendering helpers
 
 enum Bar {
@@ -228,8 +383,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private var state: State = .loading
+    private var codexState: CodexState = .loading
     private var timer: Timer?
     private var isFetching = false
+    private var isFetchingCodex = false
+
+    private var selectedService: Service {
+        get { Service(rawValue: UserDefaults.standard.string(forKey: selectedServiceKey) ?? "") ?? .claude }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: selectedServiceKey); updateButton() }
+    }
 
     private var displayMode: DisplayMode {
         get { DisplayMode(rawValue: UserDefaults.standard.string(forKey: displayModeKey) ?? "") ?? .session }
@@ -280,21 +442,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refresh() {
-        guard !isFetching else { return }
-        isFetching = true
-        if case .failed = state { state = .loading; updateButton() }
+        if !isFetching {
+            isFetching = true
+            if case .failed = state { state = .loading; updateButton() }
+            UsageReader.fetch { [weak self] result in
+                guard let self else { return }
+                self.isFetching = false
+                switch result {
+                case .success(let report): self.state = .ready(report)
+                case .failure(let error): self.state = .failed(error.message)
+                }
+                self.updateAfterFetch()
+            }
+        }
+        if !isFetchingCodex {
+            isFetchingCodex = true
+            if case .failed = codexState { codexState = .loading; updateButton() }
+            CodexReader.fetch { [weak self] result in
+                guard let self else { return }
+                self.isFetchingCodex = false
+                switch result {
+                case .success(let report): self.codexState = .ready(report)
+                case .failure(let error): self.codexState = .failed(error.message)
+                }
+                self.updateAfterFetch()
+            }
+        }
+    }
 
-        UsageReader.fetch { [weak self] result in
-            guard let self else { return }
-            self.isFetching = false
-            switch result {
-            case .success(let report): self.state = .ready(report)
-            case .failure(let error): self.state = .failed(error.message)
-            }
-            self.updateButton()
-            if let menu = self.statusItem.menu, menu.highlightedItem != nil || !menu.items.isEmpty {
-                self.rebuildMenu(menu)
-            }
+    private func updateAfterFetch() {
+        updateButton()
+        if let menu = statusItem.menu, menu.highlightedItem != nil || !menu.items.isEmpty {
+            rebuildMenu(menu)
         }
     }
 
@@ -310,6 +489,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image?.isTemplate = true
         button.image = image
 
+        switch selectedService {
+        case .claude: updateClaudeButton(button)
+        case .codex: updateCodexButton(button)
+        }
+    }
+
+    private func updateClaudeButton(_ button: NSStatusBarButton) {
         switch state {
         case .loading:
             button.attributedTitle = plainTitle("…")
@@ -325,6 +511,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func updateCodexButton(_ button: NSStatusBarButton) {
+        switch codexState {
+        case .loading:
+            button.attributedTitle = plainTitle("…")
+            button.toolTip = "Codex Usage — reading limits…"
+        case .failed:
+            button.attributedTitle = plainTitle("!")
+            button.toolTip = "Codex Usage — could not read limits (click for details)"
+        case .ready(let report):
+            button.attributedTitle = title(session: report.sessionLimit, week: report.weekLimit)
+            button.toolTip = report.limits.map { "\($0.label): \($0.percent)% used" }.joined(separator: "\n")
+        }
+    }
+
     private func plainTitle(_ text: String) -> NSAttributedString {
         NSAttributedString(string: " \(text)", attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
@@ -332,8 +532,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func title(for report: Report) -> NSAttributedString {
-        let session = report.sessionLimit
-        let week = report.weekLimit
+        title(session: report.sessionLimit, week: report.weekLimit)
+    }
+
+    private func title(session: Limit?, week: Limit?) -> NSAttributedString {
 
         let pieces: [Limit]
         switch displayMode {
@@ -368,31 +570,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        switch state {
-        case .loading:
-            menu.addItem(info("Reading /usage…"))
-        case .failed(let message):
-            menu.addItem(info("Could not read /usage"))
-            for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
-        case .ready(let report):
-            if let headline = report.headline {
-                menu.addItem(info(headline.replacingOccurrences(
-                    of: "You are currently using your subscription to power your Claude Code usage",
-                    with: "Claude Code · subscription"), small: true, muted: true))
-                menu.addItem(.separator())
-            }
+        menu.addItem(serviceTabsItem())
+        menu.addItem(.separator())
 
-            for limit in report.limits {
-                menu.addItem(gaugeItem(for: limit))
-                if let reset = limit.reset {
-                    menu.addItem(info("      resets \(reset)", small: true))
-                }
-            }
-
-            if !report.contributing.isEmpty {
-                menu.addItem(.separator())
-                for line in report.contributing { menu.addItem(info(line)) }
-            }
+        switch selectedService {
+        case .claude:
+            addClaudeReport(to: menu)
+        case .codex:
+            addCodexReport(to: menu)
         }
 
         menu.addItem(.separator())
@@ -428,7 +613,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let copyItem = NSMenuItem(title: "Copy Report", action: #selector(copyReport), keyEquivalent: "c")
         copyItem.target = self
-        if case .ready = state {} else { copyItem.isEnabled = false }
+        switch selectedService {
+        case .claude: if case .ready = state {} else { copyItem.isEnabled = false }
+        case .codex: if case .ready = codexState {} else { copyItem.isEnabled = false }
+        }
         menu.addItem(copyItem)
 
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
@@ -443,13 +631,85 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
     }
 
+    private func addClaudeReport(to menu: NSMenu) {
+        switch state {
+        case .loading:
+            menu.addItem(info("Reading /usage…"))
+        case .failed(let message):
+            menu.addItem(info("Could not read /usage"))
+            for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+        case .ready(let report):
+            if let headline = report.headline {
+                menu.addItem(info(headline.replacingOccurrences(
+                    of: "You are currently using your subscription to power your Claude Code usage",
+                    with: "Claude Code · subscription"), small: true, muted: true))
+                menu.addItem(.separator())
+            }
+
+            for limit in report.limits {
+                menu.addItem(gaugeItem(for: limit))
+                if let reset = limit.reset {
+                    menu.addItem(info("      resets \(reset)", small: true))
+                }
+            }
+
+            if !report.contributing.isEmpty {
+                menu.addItem(.separator())
+                for line in report.contributing { menu.addItem(info(line)) }
+            }
+        }
+    }
+
+    private func addCodexReport(to menu: NSMenu) {
+        switch codexState {
+        case .loading:
+            menu.addItem(info("Reading Codex limits…"))
+        case .failed(let message):
+            menu.addItem(info("Could not read Codex limits"))
+            for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+        case .ready(let report):
+            let plan = report.plan.map { " · \($0.capitalized)" } ?? ""
+            menu.addItem(info("Codex\(plan)", small: true, muted: true))
+            menu.addItem(.separator())
+            for limit in report.limits {
+                menu.addItem(gaugeItem(for: limit))
+                if let reset = limit.reset { menu.addItem(info("      resets \(reset)", small: true)) }
+            }
+            if let credits = report.credits, credits != "0" {
+                menu.addItem(.separator())
+                menu.addItem(info("Credits remaining: \(credits)"))
+            }
+        }
+    }
+
+    private func serviceTabsItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let width: CGFloat = 250
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 34))
+        let tabs = NSSegmentedControl(labels: Service.allCases.map(\.rawValue), trackingMode: .selectOne,
+                                      target: self, action: #selector(selectService(_:)))
+        tabs.frame = NSRect(x: 12, y: 5, width: width - 24, height: 24)
+        tabs.selectedSegment = selectedService == .claude ? 0 : 1
+        view.addSubview(tabs)
+        item.view = view
+        return item
+    }
+
     private func refreshTitle() -> String {
-        if isFetching { return "Refreshing…" }
-        guard case .ready(let report) = state else { return "Refresh Now" }
+        if (selectedService == .claude ? isFetching : isFetchingCodex) { return "Refreshing…" }
+        let date: Date
+        switch selectedService {
+        case .claude:
+            guard case .ready(let report) = state else { return "Refresh Now" }
+            date = report.fetchedAt
+        case .codex:
+            guard case .ready(let report) = codexState else { return "Refresh Now" }
+            date = report.fetchedAt
+        }
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         formatter.dateStyle = .none
-        return "Refresh Now (updated \(formatter.string(from: report.fetchedAt)))"
+        return "Refresh Now (updated \(formatter.string(from: date)))"
     }
 
     /// A label, a block gauge and the percentage, aligned by a monospaced font.
@@ -508,6 +768,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Actions
 
+    @objc private func selectService(_ sender: NSSegmentedControl) {
+        selectedService = sender.selectedSegment == 0 ? .claude : .codex
+        if let menu = statusItem.menu { rebuildMenu(menu) }
+    }
+
     @objc private func setDisplayMode(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let mode = DisplayMode(rawValue: raw) else { return }
         displayMode = mode
@@ -518,9 +783,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func copyReport() {
-        guard case .ready(let report) = state else { return }
+        let raw: String
+        switch selectedService {
+        case .claude:
+            guard case .ready(let report) = state else { return }
+            raw = report.raw
+        case .codex:
+            guard case .ready(let report) = codexState else { return }
+            raw = report.raw
+        }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(report.raw, forType: .string)
+        NSPasteboard.general.setString(raw, forType: .string)
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -573,6 +846,28 @@ if CommandLine.arguments.contains("--print") {
     let semaphore = DispatchSemaphore(value: 0)
     var code: Int32 = 0
     UsageReader.fetch { result in
+        switch result {
+        case .success(let report):
+            for limit in report.limits {
+                print("\(limit.label): \(limit.percent)% \(Bar.render(limit.percent))"
+                      + (limit.reset.map { " · resets \($0)" } ?? ""))
+            }
+        case .failure(let error):
+            FileHandle.standardError.write(Data("ClaudeUsage: \(error.message)\n".utf8))
+            code = 1
+        }
+        semaphore.signal()
+    }
+    while semaphore.wait(timeout: .now()) == .timedOut {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+    }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--print-codex") {
+    let semaphore = DispatchSemaphore(value: 0)
+    var code: Int32 = 0
+    CodexReader.fetch { result in
         switch result {
         case .success(let report):
             for limit in report.limits {

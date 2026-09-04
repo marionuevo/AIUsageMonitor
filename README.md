@@ -5,8 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](Sources/main.swift)
 
-A tiny macOS menu bar app that keeps your Claude Code limits in sight. It runs
-`claude -p /usage` for you and puts the answer where you can glance at it.
+A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight. It runs
+`claude -p /usage` and reads Codex's authenticated local app-server usage snapshot for you.
 
 <p align="center">
   <img src="docs/menubar.png" width="360"
@@ -27,7 +27,7 @@ It is the macOS counterpart of the Claude usage module in Omarchy's waybar.
 
 ## Usage
 
-**Click** the gauge for the full report:
+**Click** the gauge and switch between the **Claude** and **Codex** tabs for either report:
 
 ```
 Claude Code · subscription
@@ -63,6 +63,7 @@ Two headless entry points, for scripts:
 
 ```sh
 /Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --print            # limits to stdout
+/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --print-codex      # Codex limits
 /Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --login-item on    # or off / status
 ```
 
@@ -83,7 +84,8 @@ open /Applications/ClaudeUsage.app
 Re-signing after the copy matters — a moved bundle's ad-hoc signature can otherwise go
 stale and macOS will refuse to launch it.
 
-Requires the [Claude Code CLI](https://claude.com/claude-code) on the machine, signed in.
+Requires the Claude Code and/or Codex CLI on the machine, signed in. If one is unavailable,
+its tab shows the error while the other continues to work normally.
 
 ## Build
 
@@ -107,8 +109,9 @@ that command, parses the `Current …: N% used · resets …` lines with one reg
 and draws them.
 
 Nothing else happens in the background: between refreshes the app is an idle timer and a
-status item. It never reads your credentials — the CLI holds those — and it talks to no
-network service of its own.
+status item. It never reads your credentials — each CLI holds those — and it talks to no
+network service of its own. Codex usage comes from `account/rateLimits/read` on a short-lived
+local `codex app-server` process, including its rolling and weekly windows and reset times.
 
 The `claude` binary is found at `~/.local/bin`, `~/.claude/local`, Homebrew or `/usr/local`,
 falling back to asking a login shell. A refresh that hangs is killed after 45 seconds, and
