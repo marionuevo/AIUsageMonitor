@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds ClaudeUsage.app (universal, no Xcode project required).
+# Builds AIUsageMonitor.app (universal, no Xcode project required).
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-APP="build/ClaudeUsage.app"
+APP="build/AIUsageMonitor.app"
 MIN_OS="13.0"
 SDK_PATH="$(xcrun --show-sdk-path)"
 # Command Line Tools updates can briefly leave the unversioned SDK newer than
@@ -13,8 +13,8 @@ if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk ]; then
   SDK_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk
 fi
 export SDKROOT="$SDK_PATH"
-export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/claudeusage-clang-cache"
-export SWIFTPM_MODULECACHE_OVERRIDE="${TMPDIR:-/tmp}/claudeusage-swift-cache"
+export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/aiusagemonitor-clang-cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="${TMPDIR:-/tmp}/aiusagemonitor-swift-cache"
 
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -24,8 +24,8 @@ ARCHS=()
 for arch in arm64 x86_64; do
   if swiftc -O -whole-module-optimization \
        -target "${arch}-apple-macos${MIN_OS}" \
-       -o "build/ClaudeUsage-${arch}" Sources/main.swift 2>/dev/null; then
-    ARCHS+=("build/ClaudeUsage-${arch}")
+        -o "build/AIUsageMonitor-${arch}" Sources/main.swift 2>/dev/null; then
+    ARCHS+=("build/AIUsageMonitor-${arch}")
   else
     echo "  (skipping ${arch}: SDK slice unavailable)"
   fi
@@ -36,7 +36,7 @@ if [ ${#ARCHS[@]} -eq 0 ]; then
   exit 1
 fi
 
-lipo -create -output "$APP/Contents/MacOS/ClaudeUsage" "${ARCHS[@]}"
+lipo -create -output "$APP/Contents/MacOS/AIUsageMonitor" "${ARCHS[@]}"
 rm -f "${ARCHS[@]}"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -44,10 +44,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>            <string>ClaudeUsage</string>
-    <key>CFBundleDisplayName</key>     <string>Claude Usage</string>
-    <key>CFBundleExecutable</key>      <string>ClaudeUsage</string>
-    <key>CFBundleIdentifier</key>      <string>local.claudeusage</string>
+    <key>CFBundleName</key>            <string>AIUsageMonitor</string>
+    <key>CFBundleDisplayName</key>     <string>AI Usage Monitor</string>
+    <key>CFBundleExecutable</key>      <string>AIUsageMonitor</string>
+    <key>CFBundleIdentifier</key>      <string>local.aiusagemonitor</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>1.0</string>
     <key>CFBundleVersion</key>         <string>1</string>

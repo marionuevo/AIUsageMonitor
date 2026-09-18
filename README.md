@@ -1,4 +1,4 @@
-# ClaudeUsage 📊
+# AI Usage Monitor 📊
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey?logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-6-orange?logo=swift&logoColor=white)](https://swift.org)
@@ -10,7 +10,7 @@ A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight.
 
 <p align="center">
   <img src="docs/menubar.png" width="360"
-       alt="ClaudeUsage in the macOS menu bar: a gauge icon followed by the session and weekly usage percentages">
+        alt="AI Usage Monitor in the macOS menu bar: a gauge icon followed by the session and weekly usage percentages">
 </p>
 
 The number sits in the system's own label colour, so it reads like every other menu bar
@@ -45,12 +45,15 @@ Last 7d · 2829 requests · 21 sessions
 Refresh Now (updated 17:15)          ⌘R
 Menu Bar Shows                        ▸
 Refresh Every                         ▸
+Settings…                            ⌘,
 Copy Report                          ⌘C
 Launch at Login
 ──────────────────────────────────────
-Quit Claude Usage                    ⌘Q
+Quit AI Usage Monitor                ⌘Q
 ```
 
+- **Settings…** — enable or disable monitoring per provider (Claude Code and Codex). A
+  disabled provider stops being polled and disappears from the menu bar, tab and report.
 - **Menu Bar Shows** — session percentage (default), week, both, or icon only.
 - **Refresh Every** — 1, 5 (default), 15, 30 or 60 minutes. It also refreshes whenever you
   open the menu and whenever the Mac wakes from sleep.
@@ -62,9 +65,9 @@ cap gets its own gauge without any change here.
 Two headless entry points, for scripts:
 
 ```sh
-/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --print            # limits to stdout
-/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --print-codex      # Codex limits
-/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage --login-item on    # or off / status
+/Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --print            # limits to stdout
+/Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --print-codex      # Codex limits
+/Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --login-item on    # or off / status
 ```
 
 If macOS reports `requires approval`, enable it under
@@ -76,9 +79,9 @@ If macOS reports `requires approval`, enable it under
 git clone https://github.com/marionuevo/ClaudeUsage.git
 cd ClaudeUsage
 ./build.sh
-cp -R build/ClaudeUsage.app /Applications/
-codesign --force --sign - /Applications/ClaudeUsage.app
-open /Applications/ClaudeUsage.app
+cp -R build/AIUsageMonitor.app /Applications/
+codesign --force --sign - /Applications/AIUsageMonitor.app
+open /Applications/AIUsageMonitor.app
 ```
 
 Re-signing after the copy matters — a moved bundle's ad-hoc signature can otherwise go
@@ -90,7 +93,7 @@ its tab shows the error while the other continues to work normally.
 ## Build
 
 ```sh
-./build.sh          # produces build/ClaudeUsage.app (universal arm64 + x86_64, ad-hoc signed)
+./build.sh          # produces build/AIUsageMonitor.app (universal arm64 + x86_64, ad-hoc signed)
 ```
 
 Requires only the Xcode Command Line Tools (`xcode-select --install`) — there is no Xcode

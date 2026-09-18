@@ -6,6 +6,8 @@ import ServiceManagement
 private let displayModeKey = "ClaudeUsageDisplayMode"
 private let refreshMinutesKey = "ClaudeUsageRefreshMinutes"
 private let selectedServiceKey = "ClaudeUsageSelectedService"
+private let claudeEnabledKey = "ClaudeUsageClaudeEnabled"
+private let codexEnabledKey = "ClaudeUsageCodexEnabled"
 
 enum Service: String, CaseIterable {
     case claude = "Claude"
@@ -276,7 +278,7 @@ enum CodexReader {
         catch { return .failure(UsageError(message: "Could not run Codex: \(error.localizedDescription)")) }
 
         let requests = [
-            #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"claude-usage","version":"1"},"capabilities":{"experimentalApi":true}}}"#,
+            #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai-usage-monitor","version":"1"},"capabilities":{"experimentalApi":true}}}"#,
             #"{"method":"initialized"}"#,
             #"{"id":2,"method":"account/rateLimits/read","params":null}"#,
         ].joined(separator: "\n") + "\n"
@@ -387,6 +389,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var isFetching = false
     private var isFetchingCodex = false
+    private var settingsWindow: NSWindow?
 
     private var selectedService: Service {
         get { Service(rawValue: UserDefaults.standard.string(forKey: selectedServiceKey) ?? "") ?? .claude }
@@ -404,6 +407,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return stored > 0 ? stored : 5
         }
         set { UserDefaults.standard.set(newValue, forKey: refreshMinutesKey); scheduleTimer() }
+    }
+
+    /// Providers are monitored unless explicitly switched off in Settings.
+    private var claudeEnabled: Bool {
+        get {
+            UserDefaults.standard.object(forKey: claudeEnabledKey) == nil
+                ? true : UserDefaults.standard.bool(forKey: claudeEnabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: claudeEnabledKey) }
+    }
+
+    private var codexEnabled: Bool {
+        get {
+            UserDefaults.standard.object(forKey: codexEnabledKey) == nil
+                ? true : UserDefaults.standard.bool(forKey: codexEnabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: codexEnabledKey) }
+    }
+
+    private func providerEnabled(_ service: Service) -> Bool {
+        service == .claude ? claudeEnabled : codexEnabled
     }
 
     // MARK: Lifecycle
@@ -442,7 +466,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refresh() {
-        if !isFetching {
+        if claudeEnabled && !isFetching {
             isFetching = true
             if case .failed = state { state = .loading; updateButton() }
             UsageReader.fetch { [weak self] result in
@@ -455,7 +479,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.updateAfterFetch()
             }
         }
-        if !isFetchingCodex {
+        if codexEnabled && !isFetchingCodex {
             isFetchingCodex = true
             if case .failed = codexState { codexState = .loading; updateButton() }
             CodexReader.fetch { [weak self] result in
@@ -484,12 +508,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let names = ["gauge.with.dots.needle.bot.50percent", "gauge.medium", "gauge"]
         let image = names.lazy
-            .compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: "Claude usage") }
+            .compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: "AI usage") }
             .first
         image?.isTemplate = true
         button.image = image
 
-        switch selectedService {
+        let service: Service
+        if providerEnabled(selectedService) {
+            service = selectedService
+        } else if let first = enabledServices.first {
+            // Silently move to a provider that is still monitored. Writing the
+            // default directly avoids the setter's updateButton recursion.
+            service = first
+            UserDefaults.standard.set(service.rawValue, forKey: selectedServiceKey)
+        } else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.toolTip = "AI Usage Monitor — all providers are off (see Settings)"
+            return
+        }
+
+        switch service {
         case .claude: updateClaudeButton(button)
         case .codex: updateCodexButton(button)
         }
@@ -499,10 +537,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .loading:
             button.attributedTitle = plainTitle("…")
-            button.toolTip = "Claude Usage — reading /usage…"
+            button.toolTip = "AI Usage Monitor — reading /usage…"
         case .failed:
             button.attributedTitle = plainTitle("!")
-            button.toolTip = "Claude Usage — could not read /usage (click for details)"
+            button.toolTip = "AI Usage Monitor — could not read /usage (click for details)"
         case .ready(let report):
             button.attributedTitle = title(for: report)
             button.toolTip = report.limits
@@ -515,10 +553,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch codexState {
         case .loading:
             button.attributedTitle = plainTitle("…")
-            button.toolTip = "Codex Usage — reading limits…"
+            button.toolTip = "AI Usage Monitor — reading limits…"
         case .failed:
             button.attributedTitle = plainTitle("!")
-            button.toolTip = "Codex Usage — could not read limits (click for details)"
+            button.toolTip = "AI Usage Monitor — could not read limits (click for details)"
         case .ready(let report):
             button.attributedTitle = title(session: report.sessionLimit, week: report.weekLimit)
             button.toolTip = report.limits.map { "\($0.label): \($0.percent)% used" }.joined(separator: "\n")
@@ -563,6 +601,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Menu
 
     func menuWillOpen(_ menu: NSMenu) {
+        updateButton()
         rebuildMenu(menu)
         refresh()
     }
@@ -573,11 +612,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(serviceTabsItem())
         menu.addItem(.separator())
 
-        switch selectedService {
-        case .claude:
-            addClaudeReport(to: menu)
-        case .codex:
-            addCodexReport(to: menu)
+        if !providerEnabled(selectedService) {
+            menu.addItem(info("\(selectedService.rawValue) monitoring is off."))
+            menu.addItem(info("  Enable it in Settings.", small: true, muted: true))
+        } else {
+            switch selectedService {
+            case .claude:
+                addClaudeReport(to: menu)
+            case .codex:
+                addCodexReport(to: menu)
+            }
         }
 
         menu.addItem(.separator())
@@ -611,13 +655,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         intervalItem.submenu = intervalMenu
         menu.addItem(intervalItem)
 
-        let copyItem = NSMenuItem(title: "Copy Report", action: #selector(copyReport), keyEquivalent: "c")
-        copyItem.target = self
-        switch selectedService {
-        case .claude: if case .ready = state {} else { copyItem.isEnabled = false }
-        case .codex: if case .ready = codexState {} else { copyItem.isEnabled = false }
-        }
-        menu.addItem(copyItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(selectSettingsItem(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        if let copyItem = copyReportItem() { menu.addItem(copyItem) }
 
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         login.target = self
@@ -626,7 +668,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "Quit Claude Usage", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit AI Usage Monitor", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }
@@ -682,15 +724,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var enabledServices: [Service] {
+        Service.allCases.filter { providerEnabled($0) }
+    }
+
     private func serviceTabsItem() -> NSMenuItem {
         let item = NSMenuItem()
         let width: CGFloat = 250
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 34))
-        let tabs = NSSegmentedControl(labels: Service.allCases.map(\.rawValue), trackingMode: .selectOne,
-                                      target: self, action: #selector(selectService(_:)))
-        tabs.frame = NSRect(x: 12, y: 5, width: width - 24, height: 24)
-        tabs.selectedSegment = selectedService == .claude ? 0 : 1
-        view.addSubview(tabs)
+        let shown = enabledServices
+        if !shown.isEmpty {
+            let tabs = NSSegmentedControl(labels: shown.map(\.rawValue), trackingMode: .selectOne,
+                                          target: self, action: #selector(selectService(_:)))
+            tabs.frame = NSRect(x: 12, y: 5, width: width - 24, height: 24)
+            tabs.selectedSegment = max(0, shown.firstIndex(of: selectedService) ?? 0)
+            view.addSubview(tabs)
+        }
         item.view = view
         return item
     }
@@ -768,8 +817,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Actions
 
+    private func copyReportItem() -> NSMenuItem? {
+        guard let raw = currentReportRaw else { return nil }
+        let copyItem = NSMenuItem(title: "Copy Report", action: #selector(copyReport(_:)), keyEquivalent: "c")
+        copyItem.target = self
+        copyItem.representedObject = raw
+        return copyItem
+    }
+
+    private var currentReportRaw: String? {
+        let service: Service
+        if providerEnabled(selectedService) { service = selectedService }
+        else if let first = enabledServices.first { service = first }
+        else { return nil }
+        switch service {
+        case .claude: if case .ready(let report) = state { return report.raw }
+        case .codex:  if case .ready(let report) = codexState { return report.raw }
+        }
+        return nil
+    }
+
     @objc private func selectService(_ sender: NSSegmentedControl) {
-        selectedService = sender.selectedSegment == 0 ? .claude : .codex
+        if sender.selectedSegment < enabledServices.count { selectedService = enabledServices[sender.selectedSegment] }
         if let menu = statusItem.menu { rebuildMenu(menu) }
     }
 
@@ -782,18 +851,94 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMinutes = sender.tag
     }
 
-    @objc private func copyReport() {
-        let raw: String
-        switch selectedService {
-        case .claude:
-            guard case .ready(let report) = state else { return }
-            raw = report.raw
-        case .codex:
-            guard case .ready(let report) = codexState else { return }
-            raw = report.raw
-        }
+    @objc private func copyReport(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(raw, forType: .string)
+    }
+
+    @objc private func selectSettingsItem(_ sender: NSMenuItem) {
+        showSettings()
+    }
+
+    @objc private func showSettings() {
+        if settingsWindow == nil { buildSettingsWindow() }
+        if let window = settingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func buildSettingsWindow() {
+        let contentWidth: CGFloat = 340
+        let contentHeight: CGFloat = 164
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        window.title = "AI Usage Monitor Settings"
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
+
+        let header = NSTextField(labelWithString: "Monitored Providers")
+        header.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        header.frame = NSRect(x: 20, y: contentHeight - 44, width: contentWidth - 40, height: 20)
+        content.addSubview(header)
+
+        func providerRow(_ service: Service, y: CGFloat) -> NSButton {
+            switch service {
+            case .claude:
+                return NSButton(checkboxWithTitle:
+                    "Monitor Claude Code limits", target: self, action: #selector(toggleClaude(_:)))
+            case .codex:
+                return NSButton(checkboxWithTitle:
+                    "Monitor Codex limits", target: self, action: #selector(toggleCodex(_:)))
+            }
+        }
+
+        let claudeToggle = providerRow(.claude, y: contentHeight - 78)
+        claudeToggle.state = claudeEnabled ? .on : .off
+        claudeToggle.frame = NSRect(x: 20, y: contentHeight - 78, width: contentWidth - 40, height: 20)
+        content.addSubview(claudeToggle)
+
+        let codexToggle = providerRow(.codex, y: contentHeight - 100)
+        codexToggle.state = codexEnabled ? .on : .off
+        codexToggle.frame = NSRect(x: 20, y: contentHeight - 100, width: contentWidth - 40, height: 20)
+        content.addSubview(codexToggle)
+
+        let note = NSTextField(wrappingLabelWithString:
+            "Turn a provider off while you are not subscribed to it; the app stops polling it and hides its tab. Re-enable any time.")
+        note.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        note.textColor = .secondaryLabelColor
+        note.frame = NSRect(x: 20, y: 14, width: contentWidth - 40, height: 42)
+        content.addSubview(note)
+
+        window.contentView = content
+        settingsWindow = window
+    }
+
+    private func setEnabled(_ service: Service, enabled: Bool) {
+        switch service {
+        case .claude: claudeEnabled = enabled
+        case .codex:  codexEnabled = enabled
+        }
+        if !providerEnabled(selectedService), let first = enabledServices.first {
+            // Writing the default directly avoids the setter's updateButton recursion.
+            UserDefaults.standard.set(first.rawValue, forKey: selectedServiceKey)
+        }
+        updateButton()
+        if let menu = statusItem.menu { rebuildMenu(menu) }
+        if service == selectedService { refresh() }
+    }
+
+    @objc private func toggleClaude(_ sender: NSButton) {
+        setEnabled(.claude, enabled: sender.state == .on)
+    }
+
+    @objc private func toggleCodex(_ sender: NSButton) {
+        setEnabled(.codex, enabled: sender.state == .on)
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -816,8 +961,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-// Headless entry points, matching StayAwake: `ClaudeUsage --login-item on|off|status`
-// and `ClaudeUsage --print` to check what the app reads without opening the menu.
+// Headless entry points, matching StayAwake: `AIUsageMonitor --login-item on|off|status`
+// and `AIUsageMonitor --print` to check what the app reads without opening the menu.
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--login-item") {
     let service = SMAppService.mainApp
     let argument = CommandLine.arguments.count > flagIndex + 1 ? CommandLine.arguments[flagIndex + 1] : "status"
@@ -828,7 +973,7 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--login-item") {
         default:    break
         }
     } catch {
-        FileHandle.standardError.write(Data("ClaudeUsage: \(error.localizedDescription)\n".utf8))
+        FileHandle.standardError.write(Data("AIUsageMonitor: \(error.localizedDescription)\n".utf8))
         exit(1)
     }
     let status: String
@@ -853,7 +998,7 @@ if CommandLine.arguments.contains("--print") {
                       + (limit.reset.map { " · resets \($0)" } ?? ""))
             }
         case .failure(let error):
-            FileHandle.standardError.write(Data("ClaudeUsage: \(error.message)\n".utf8))
+            FileHandle.standardError.write(Data("AIUsageMonitor: \(error.message)\n".utf8))
             code = 1
         }
         semaphore.signal()
@@ -875,7 +1020,7 @@ if CommandLine.arguments.contains("--print-codex") {
                       + (limit.reset.map { " · resets \($0)" } ?? ""))
             }
         case .failure(let error):
-            FileHandle.standardError.write(Data("ClaudeUsage: \(error.message)\n".utf8))
+            FileHandle.standardError.write(Data("AIUsageMonitor: \(error.message)\n".utf8))
             code = 1
         }
         semaphore.signal()
