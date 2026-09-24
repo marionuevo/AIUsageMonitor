@@ -42,6 +42,7 @@ struct Report {
     var headline: String?
     var limits: [Limit] = []
     var contributing: [String] = []
+    var modelUsage = ModelUsageReport()
     var raw: String = ""
     var fetchedAt = Date()
 
@@ -53,13 +54,14 @@ struct Report {
 enum State {
     case loading
     case ready(Report)
-    case failed(String)
+    case failed(String, ModelUsageReport)
 }
 
 struct CodexReport {
     var limits: [Limit]
     var plan: String?
     var credits: String?
+    var modelUsage = ModelUsageReport()
     var raw: String
     var fetchedAt = Date()
 
@@ -70,13 +72,45 @@ struct CodexReport {
 enum CodexState {
     case loading
     case ready(CodexReport)
-    case failed(String)
+    case failed(String, ModelUsageReport)
+}
+
+/// Model shares use token totals from provider-local session records. They
+/// describe the observed token mix, not the provider's quota accounting.
+struct ModelUsageReport {
+    struct Entry {
+        let model: String
+        let tokens: Int
+        let share: Double
+
+        var percentageLabel: String {
+            if share < 0.1 { return "<0.1%" }
+            return share < 10 ? String(format: "%.1f%%", share) : String(format: "%.0f%%", share.rounded())
+        }
+    }
+
+    var entries: [Entry] = []
+    var totalTokens = 0
+
+    init(counts: [String: Int] = [:]) {
+        totalTokens = counts.values.reduce(0, +)
+        guard totalTokens > 0 else { return }
+        entries = counts
+            .filter { $0.value > 0 }
+            .map { Entry(model: $0.key, tokens: $0.value,
+                         share: Double($0.value) / Double(totalTokens) * 100) }
+            .sorted {
+                if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+                return $0.model.localizedStandardCompare($1.model) == .orderedAscending
+            }
+    }
 }
 
 // MARK: - Reading `/usage`
 
 struct UsageError: Error {
     let message: String
+    var modelUsage = ModelUsageReport()
 }
 
 /// `/usage` is a local slash command: in print mode it answers in about a
@@ -117,8 +151,9 @@ enum UsageReader {
     }
 
     private static func fetchSynchronously() -> Result<Report, UsageError> {
+        let modelUsage = LocalModelUsageReader.read(.claude)
         guard let cli = locateCLI() else {
-            return .failure(UsageError(message: "Could not find the `claude` command."))
+            return .failure(UsageError(message: "Could not find the `claude` command.", modelUsage: modelUsage))
         }
 
         let process = Process()
@@ -141,7 +176,8 @@ enum UsageReader {
         do {
             try process.run()
         } catch {
-            return .failure(UsageError(message: "Could not run claude: \(error.localizedDescription)"))
+            return .failure(UsageError(message: "Could not run claude: \(error.localizedDescription)",
+                                       modelUsage: modelUsage))
         }
 
         // Don't let a hung CLI wedge the app; 45s is far beyond the normal ~1s.
@@ -157,14 +193,19 @@ enum UsageReader {
         let errorText = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard process.terminationStatus == 0 else {
-            return .failure(UsageError(message: errorText.isEmpty ? "claude exited with code \(process.terminationStatus)." : errorText))
+            return .failure(UsageError(message: errorText.isEmpty
+                ? "claude exited with code \(process.terminationStatus)." : errorText,
+                modelUsage: modelUsage))
         }
 
-        let report = parse(text)
+        var report = parse(text)
         guard !report.limits.isEmpty else {
             let hint = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return .failure(UsageError(message: hint.isEmpty ? "No usage information returned. Are you signed in?" : hint))
+            return .failure(UsageError(message: hint.isEmpty
+                ? "No usage information returned. Are you signed in?" : hint,
+                modelUsage: modelUsage))
         }
+        report.modelUsage = modelUsage
         return .success(report)
     }
 
@@ -256,8 +297,9 @@ enum CodexReader {
     }
 
     private static func fetchSynchronously() -> Result<CodexReport, UsageError> {
+        let modelUsage = LocalModelUsageReader.read(.codex)
         guard let cli = locateCLI() else {
-            return .failure(UsageError(message: "Could not find the `codex` command."))
+            return .failure(UsageError(message: "Could not find the `codex` command.", modelUsage: modelUsage))
         }
 
         let process = Process()
@@ -275,7 +317,10 @@ enum CodexReader {
         process.standardOutput = output
         process.standardError = error
         do { try process.run() }
-        catch { return .failure(UsageError(message: "Could not run Codex: \(error.localizedDescription)")) }
+        catch {
+            return .failure(UsageError(message: "Could not run Codex: \(error.localizedDescription)",
+                                       modelUsage: modelUsage))
+        }
 
         let requests = [
             #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai-usage-monitor","version":"1"},"capabilities":{"experimentalApi":true}}}"#,
@@ -305,14 +350,17 @@ enum CodexReader {
         guard let response else {
             let message = String(decoding: error.fileHandleForReading.availableData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return .failure(UsageError(message: message.isEmpty ? "Codex did not return usage information." : message))
+            return .failure(UsageError(message: message.isEmpty
+                ? "Codex did not return usage information." : message, modelUsage: modelUsage))
         }
         if let rpcError = response["error"] as? [String: Any] {
-            return .failure(UsageError(message: rpcError["message"] as? String ?? "Codex usage request failed."))
+            return .failure(UsageError(message: rpcError["message"] as? String ?? "Codex usage request failed.",
+                                       modelUsage: modelUsage))
         }
         guard let result = response["result"] as? [String: Any],
               let snapshot = result["rateLimits"] as? [String: Any] else {
-            return .failure(UsageError(message: "Codex returned an unfamiliar usage response."))
+            return .failure(UsageError(message: "Codex returned an unfamiliar usage response.",
+                                       modelUsage: modelUsage))
         }
 
         var limits: [Limit] = []
@@ -323,14 +371,17 @@ enum CodexReader {
             limits.append(limit(from: secondary, fallbackLabel: "Weekly limit"))
         }
         guard !limits.isEmpty else {
-            return .failure(UsageError(message: "No Codex rate limits were returned. Are you signed in?"))
+            return .failure(UsageError(message: "No Codex rate limits were returned. Are you signed in?",
+                                       modelUsage: modelUsage))
         }
         let plan = snapshot["planType"] as? String
         let creditsObject = snapshot["credits"] as? [String: Any]
         let credits = creditsObject?["balance"] as? String
         let rawData = (try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])) ?? Data()
-        return .success(CodexReport(limits: limits, plan: plan, credits: credits,
-                                    raw: String(decoding: rawData, as: UTF8.self)))
+        var report = CodexReport(limits: limits, plan: plan, credits: credits,
+                                 raw: String(decoding: rawData, as: UTF8.self))
+        report.modelUsage = modelUsage
+        return .success(report)
     }
 
     private static func limit(from object: [String: Any], fallbackLabel: String) -> Limit {
@@ -348,6 +399,229 @@ enum CodexReader {
             return formatter.string(from: Date(timeIntervalSince1970: $0.doubleValue))
         }
         return Limit(label: label, percent: percent, reset: reset)
+    }
+}
+
+// MARK: - Local model token history
+
+/// Both providers keep local session records with model, timestamp and token
+/// usage fields. Only those fields are read; conversation and tool content are
+/// ignored.
+enum LocalModelUsageReader {
+    private static let maxLineSize = 8 * 1024 * 1024
+
+    private struct DateParser {
+        private let fractional = ISO8601DateFormatter()
+        private let standard = ISO8601DateFormatter()
+
+        init() {
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            standard.formatOptions = [.withInternetDateTime]
+        }
+
+        func parse(_ value: String) -> Date? {
+            fractional.date(from: value) ?? standard.date(from: value)
+        }
+    }
+
+    static func read(_ service: Service, now: Date = Date()) -> ModelUsageReport {
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        let cutoff = Calendar.current.date(byAdding: .day, value: -6, to: startOfToday)
+            ?? now.addingTimeInterval(-7 * 24 * 60 * 60)
+        let directories: [URL]
+        let claudeHome: URL?
+        switch service {
+        case .claude:
+            let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+                ?? "\(NSHomeDirectory())/.claude"
+            let home = URL(fileURLWithPath: (configured as NSString).expandingTildeInPath,
+                           isDirectory: true)
+            claudeHome = home
+            directories = [home.appendingPathComponent("projects", isDirectory: true)]
+        case .codex:
+            let configured = ProcessInfo.processInfo.environment["CODEX_HOME"]
+                ?? "\(NSHomeDirectory())/.codex"
+            let codexHome = URL(fileURLWithPath: (configured as NSString).expandingTildeInPath,
+                                isDirectory: true)
+            claudeHome = nil
+            directories = [codexHome.appendingPathComponent("sessions", isDirectory: true),
+                           codexHome.appendingPathComponent("archived_sessions", isDirectory: true)]
+        }
+
+        var counts: [String: Int] = [:]
+        var seenClaudeMessages = Set<String>()
+        var seenCodexResponses = Set<String>()
+        var codexModelsByFile: [String: String] = [:]
+        var codexLegacyTokensByFile: [String: [String: Int]] = [:]
+        var codexFilesWithResponseRecords = Set<String>()
+        let dateParser = DateParser()
+
+        for directory in directories {
+            forEachRecentJSONLine(in: directory, since: cutoff) { file, line in
+                guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return }
+                let type = object["type"] as? String
+
+                switch service {
+                case .claude:
+                    let message = object["message"] as? [String: Any] ?? [:]
+                    guard type == "assistant" || (message["role"] as? String) == "assistant",
+                          let timestamp = ((object["timestamp"] as? String)
+                            ?? (message["timestamp"] as? String)).flatMap(dateParser.parse), timestamp >= cutoff,
+                          let usage = (message["usage"] as? [String: Any])
+                            ?? (object["usage"] as? [String: Any]) else { return }
+                    let model = (message["model"] as? String)
+                        ?? (object["model"] as? String) ?? "claude"
+                    let id = (message["id"] as? String) ?? (object["messageId"] as? String)
+                    if let id, !seenClaudeMessages.insert(id).inserted { return }
+                    let tokens = claudeTokenTotal(usage)
+                    guard tokens > 0 else { return }
+                    counts[model, default: 0] += tokens
+
+                case .codex:
+                    guard let payload = object["payload"] as? [String: Any] else { return }
+                    let path = file.path
+                    if type == "turn_context" {
+                        let model = (payload["model"] as? String)
+                            ?? (payload["model_slug"] as? String)
+                        if let model, !model.isEmpty { codexModelsByFile[path] = model }
+                        return
+                    }
+                    let timestamp = (object["timestamp"] as? String).flatMap(dateParser.parse)
+                    if type == "token_usage_record", let timestamp, timestamp >= cutoff,
+                       let usage = payload["usage"] as? [String: Any] {
+                        if let id = payload["response_id"] as? String,
+                           !seenCodexResponses.insert("\(path)#\(id)").inserted { return }
+                        let model = (payload["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                            ?? codexModelsByFile[path] ?? "Unknown model"
+                        let tokens = codexTokenTotal(usage)
+                        guard tokens > 0 else { return }
+                        codexFilesWithResponseRecords.insert(path)
+                        counts[model, default: 0] += tokens
+                        return
+                    }
+
+                    // Older Codex rollouts have token_count snapshots instead
+                    // of per-response records. Keep last_token_usage and use
+                    // those entries only for files without response records.
+                    guard type == "event_msg", let timestamp, timestamp >= cutoff,
+                          (payload["type"] as? String) == "token_count",
+                          let info = payload["info"] as? [String: Any],
+                          let usage = info["last_token_usage"] as? [String: Any] else { return }
+                    let tokens = codexTokenTotal(usage)
+                    guard tokens > 0 else { return }
+                    let model = codexModelsByFile[path] ?? "Unknown model"
+                    codexLegacyTokensByFile[path, default: [:]][model, default: 0] += tokens
+                }
+            }
+        }
+
+        for (path, modelCounts) in codexLegacyTokensByFile where !codexFilesWithResponseRecords.contains(path) {
+            for (model, tokens) in modelCounts { counts[model, default: 0] += tokens }
+        }
+        if service == .claude, counts.isEmpty, let claudeHome {
+            counts = claudeCacheModelTotals(at: claudeHome, from: cutoff, through: now)
+        }
+        return ModelUsageReport(counts: counts)
+    }
+
+    /// Claude Code maintains daily token totals as a fallback when session
+    /// transcript records are absent or unavailable.
+    private static func claudeCacheModelTotals(at directory: URL, from cutoff: Date, through now: Date) -> [String: Int] {
+        let file = directory.appendingPathComponent("stats-cache.json")
+        guard let data = try? Data(contentsOf: file),
+              let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let daily = cache["dailyModelTokens"] as? [[String: Any]] else { return [:] }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        let firstDay = formatter.string(from: cutoff)
+        let lastDay = formatter.string(from: now)
+
+        var counts: [String: Int] = [:]
+        for day in daily {
+            guard let date = day["date"] as? String, date >= firstDay, date <= lastDay,
+                  let tokensByModel = day["tokensByModel"] as? [String: Any] else { continue }
+            for (model, rawTokens) in tokensByModel {
+                let tokens = max(0, (rawTokens as? NSNumber)?.intValue ?? 0)
+                if tokens > 0 { counts[model, default: 0] += tokens }
+            }
+        }
+        return counts
+    }
+
+    private static func value(_ usage: [String: Any], snakeCase: String, camelCase: String) -> Int {
+        let raw = usage[snakeCase] ?? usage[camelCase]
+        return max(0, (raw as? NSNumber)?.intValue ?? 0)
+    }
+
+    /// Anthropic records cache token categories separately from ordinary input.
+    private static func claudeTokenTotal(_ usage: [String: Any]) -> Int {
+        value(usage, snakeCase: "input_tokens", camelCase: "inputTokens")
+            + value(usage, snakeCase: "output_tokens", camelCase: "outputTokens")
+            + value(usage, snakeCase: "cache_read_input_tokens", camelCase: "cacheReadInputTokens")
+            + value(usage, snakeCase: "cache_creation_input_tokens", camelCase: "cacheCreationInputTokens")
+    }
+
+    /// Codex's input total already includes cached input; adding the cache
+    /// fields again would count those tokens twice.
+    private static func codexTokenTotal(_ usage: [String: Any]) -> Int {
+        let total = value(usage, snakeCase: "total_tokens", camelCase: "totalTokens")
+        if total > 0 { return total }
+        return value(usage, snakeCase: "input_tokens", camelCase: "inputTokens")
+            + value(usage, snakeCase: "output_tokens", camelCase: "outputTokens")
+    }
+
+    /// Stream JSONL files and skip stale files by modification date, so a
+    /// refresh never needs to load an entire transcript into memory.
+    private static func forEachRecentJSONLine(
+        in directory: URL,
+        since cutoff: Date,
+        visit: (URL, Data) -> Void
+    ) {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { return }
+
+        while let file = enumerator.nextObject() as? URL {
+            guard file.pathExtension == "jsonl",
+                  let values = try? file.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate, modified >= cutoff else { continue }
+            streamLines(from: file, visit: visit)
+        }
+    }
+
+    private static func streamLines(from file: URL, visit: (URL, Data) -> Void) {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return }
+        defer { try? handle.close() }
+
+        var buffer = Data()
+        var skippingOversizedLine = false
+        while true {
+            let chunk = handle.readData(ofLength: 64 * 1024)
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+
+            while let newline = buffer.firstIndex(of: 10) {
+                if skippingOversizedLine {
+                    buffer.removeSubrange(...newline)
+                    skippingOversizedLine = false
+                    continue
+                }
+                let line = Data(buffer[..<newline])
+                if !line.isEmpty { visit(file, line) }
+                buffer.removeSubrange(...newline)
+            }
+
+            if buffer.count > maxLineSize {
+                buffer.removeAll(keepingCapacity: true)
+                skippingOversizedLine = true
+            }
+        }
+        if !skippingOversizedLine, !buffer.isEmpty { visit(file, buffer) }
     }
 }
 
@@ -474,7 +748,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.isFetching = false
                 switch result {
                 case .success(let report): self.state = .ready(report)
-                case .failure(let error): self.state = .failed(error.message)
+                case .failure(let error): self.state = .failed(error.message, error.modelUsage)
                 }
                 self.updateAfterFetch()
             }
@@ -487,7 +761,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.isFetchingCodex = false
                 switch result {
                 case .success(let report): self.codexState = .ready(report)
-                case .failure(let error): self.codexState = .failed(error.message)
+                case .failure(let error): self.codexState = .failed(error.message, error.modelUsage)
                 }
                 self.updateAfterFetch()
             }
@@ -677,9 +951,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .loading:
             menu.addItem(info("Reading /usage…"))
-        case .failed(let message):
+        case .failed(let message, let modelUsage):
             menu.addItem(info("Could not read /usage"))
             for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+            addModelUsageSection(modelUsage, to: menu)
         case .ready(let report):
             if let headline = report.headline {
                 menu.addItem(info(headline.replacingOccurrences(
@@ -699,6 +974,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(.separator())
                 for line in report.contributing { menu.addItem(info(line)) }
             }
+            addModelUsageSection(report.modelUsage, to: menu)
         }
     }
 
@@ -706,9 +982,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch codexState {
         case .loading:
             menu.addItem(info("Reading Codex limits…"))
-        case .failed(let message):
+        case .failed(let message, let modelUsage):
             menu.addItem(info("Could not read Codex limits"))
             for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+            addModelUsageSection(modelUsage, to: menu)
         case .ready(let report):
             let plan = report.plan.map { " · \($0.capitalized)" } ?? ""
             menu.addItem(info("Codex\(plan)", small: true, muted: true))
@@ -721,7 +998,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(.separator())
                 menu.addItem(info("Credits remaining: \(credits)"))
             }
+            addModelUsageSection(report.modelUsage, to: menu)
         }
+    }
+
+    private func addModelUsageSection(_ report: ModelUsageReport, to menu: NSMenu) {
+        menu.addItem(.separator())
+        menu.addItem(info("Model token share · last 7 days", small: true, muted: true))
+        guard !report.entries.isEmpty else {
+            menu.addItem(info("No model token usage recorded", small: true, muted: true))
+            return
+        }
+        for entry in report.entries { menu.addItem(modelUsageItem(for: entry)) }
     }
 
     private var enabledServices: [Service] {
@@ -783,6 +1071,44 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.attributedTitle = text
+        return item
+    }
+
+    /// Two-line model row: a readable name and share above a native progress
+    /// bar that inherits the user's macOS accent color.
+    private func modelUsageItem(for entry: ModelUsageReport.Entry) -> NSMenuItem {
+        let width: CGFloat = 250
+        let height: CGFloat = 34
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.group)
+        row.setAccessibilityLabel("\(entry.model), \(entry.percentageLabel) of model tokens")
+
+        let name = NSTextField(labelWithString: entry.model)
+        name.frame = NSRect(x: 12, y: 17, width: width - 74, height: 14)
+        name.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        name.lineBreakMode = .byTruncatingTail
+        row.addSubview(name)
+
+        let percentage = NSTextField(labelWithString: entry.percentageLabel)
+        percentage.frame = NSRect(x: width - 54, y: 17, width: 42, height: 14)
+        percentage.alignment = .right
+        percentage.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        row.addSubview(percentage)
+
+        let bar = NSProgressIndicator(frame: NSRect(x: 12, y: 4, width: width - 24, height: 8))
+        bar.style = .bar
+        bar.controlSize = .mini
+        bar.minValue = 0
+        bar.maxValue = 100
+        bar.doubleValue = entry.share
+        bar.isIndeterminate = false
+        bar.setAccessibilityLabel("\(entry.model) token share")
+        bar.setAccessibilityValue(entry.percentageLabel as NSString)
+        row.addSubview(bar)
+
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.view = row
         return item
     }
 

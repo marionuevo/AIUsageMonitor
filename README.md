@@ -37,6 +37,12 @@ Session             ████░░░░░░   43%
 Week (all models)   █░░░░░░░░░    5%
       resets Sep 4 at 3:59pm
 ──────────────────────────────────────
+Model token share · last 7 days
+claude-opus-4-1                     62%
+████████████████████████░░░░░░░░░░░░
+claude-sonnet-4-5                   38%
+███████████████░░░░░░░░░░░░░░░░░░░░░
+──────────────────────────────────────
 Last 7d · 2829 requests · 21 sessions
   80% of your usage was at >150k context
   49% of your usage came from sessions active for 8+ hours
@@ -61,6 +67,13 @@ Quit AI Usage Monitor                ⌘Q
 
 Every limit row the CLI reports is rendered, so a plan that reports a separate Opus weekly
 cap gets its own gauge without any change here.
+
+The model bars show each model's share of recorded token usage over the last seven days.
+They are calculated separately for Claude and Codex from local session records, so they
+describe token mix rather than subscription quota. The app reads timestamps, model identifiers,
+and token counts from Claude Code's local records and Codex's session files; it doesn't retain
+prompt, response, or tool content. If Claude transcripts are unavailable, it falls back to
+Claude Code's daily model totals in `stats-cache.json`.
 
 Two headless entry points, for scripts:
 
@@ -113,8 +126,11 @@ and draws them.
 
 Nothing else happens in the background: between refreshes the app is an idle timer and a
 status item. It never reads your credentials — each CLI holds those — and it talks to no
-network service of its own. Codex usage comes from `account/rateLimits/read` on a short-lived
-local `codex app-server` process, including its rolling and weekly windows and reset times.
+network service of its own. For model shares, it scans recent local Claude transcripts and
+Codex rollouts, using model names, timestamps, and token counts. It honors `CLAUDE_CONFIG_DIR`
+and `CODEX_HOME` when set. Codex limit usage comes from `account/rateLimits/read` on a
+short-lived local `codex app-server` process, including its rolling and weekly windows and
+reset times.
 
 The `claude` binary is found at `~/.local/bin`, `~/.claude/local`, Homebrew or `/usr/local`,
 falling back to asking a login shell. A refresh that hangs is killed after 45 seconds, and
