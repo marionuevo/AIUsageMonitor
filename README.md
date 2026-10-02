@@ -42,16 +42,19 @@ Week (all models)                    5%
 ██████████░░░░░░░░░░░░░░░░░░░░░░░░░░
 4d 23h left · resets Sep 4 at 3:59pm 29%
 ──────────────────────────────────────
+Last 7d · 2829 requests · 21 sessions
+80% of your usage was at >150k
+context
+49% of your usage came from
+sessions active for 8+ hours
+14% of your usage came from
+subagent-heavy sessions
+──────────────────────────────────────
 Model token share · last 7 days
 claude-opus-4-1                     62%
 ████████████████████████░░░░░░░░░░░░
 claude-sonnet-4-5                   38%
 ███████████████░░░░░░░░░░░░░░░░░░░░░
-──────────────────────────────────────
-Last 7d · 2829 requests · 21 sessions
-  80% of your usage was at >150k context
-  49% of your usage came from sessions active for 8+ hours
-  14% of your usage came from subagent-heavy sessions
 ──────────────────────────────────────
 Refresh Now (updated 17:15)          ⌘R
 Menu Bar Shows                        ▸
@@ -75,6 +78,9 @@ accent colour (red past 85%), and beneath it a grey clock bar with the share of 
 window (5 hours or 7 days) that has already gone by, captioned with the time left until it resets.
 Read the pair together: a usage bar longer than its clock bar means you are spending faster
 than the window is passing; a shorter one means you have room to spare.
+
+The "What's contributing" figures from `/usage` sit under the limits. Report rows are a
+fixed 250 points wide, so a long figure wraps onto a second line, never widening the menu.
 
 Every limit row the CLI reports is rendered, so a plan that reports a separate Opus weekly
 cap gets its own gauge without any change here.

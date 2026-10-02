@@ -1139,7 +1139,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(info("Reading /usage…"))
         case .failed(let message, let modelUsage):
             menu.addItem(info("Could not read /usage"))
-            for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+            menu.addItem(wrappedInfo(message, heading: true))
             addModelUsageSection(modelUsage, to: menu)
         case .ready(let report):
             if let headline = report.headline {
@@ -1153,7 +1153,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             if !report.contributing.isEmpty {
                 menu.addItem(.separator())
-                for line in report.contributing { menu.addItem(info(line)) }
+                // Unindented lines head the section; the indented ones are its figures.
+                for line in report.contributing {
+                    menu.addItem(wrappedInfo(line, heading: !line.hasPrefix(" ")))
+                }
             }
             addModelUsageSection(report.modelUsage, to: menu)
         }
@@ -1165,7 +1168,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(info("Reading Codex limits…"))
         case .failed(let message, let modelUsage):
             menu.addItem(info("Could not read Codex limits"))
-            for line in wrap(message, at: 60) { menu.addItem(info("  \(line)")) }
+            menu.addItem(wrappedInfo(message, heading: true))
             addModelUsageSection(modelUsage, to: menu)
         case .ready(let report):
             let plan = report.plan.map { " · \($0.capitalized)" } ?? ""
@@ -1283,21 +1286,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func wrap(_ text: String, at width: Int) -> [String] {
-        var lines: [String] = []
-        var current = ""
-        for word in text.split(separator: " ") {
-            if current.isEmpty {
-                current = String(word)
-            } else if current.count + word.count + 1 <= width {
-                current += " \(word)"
-            } else {
-                lines.append(current)
-                current = String(word)
-            }
-        }
-        if !current.isEmpty { lines.append(current) }
-        return lines
+    /// A text row that wraps at the menu's fixed width instead of widening the
+    /// whole menu. Headings take the small secondary style and line up with
+    /// native item titles; body rows line up with the limit and model rows.
+    private func wrappedInfo(_ text: String, heading: Bool = false) -> NSMenuItem {
+        let width = LimitRow.width
+        let inset: CGFloat = heading ? 22 : 12
+        let field = NSTextField(wrappingLabelWithString: text.trimmingCharacters(in: .whitespaces))
+        field.font = .systemFont(ofSize: heading ? NSFont.smallSystemFontSize : NSFont.systemFontSize)
+        field.textColor = heading ? .secondaryLabelColor : .labelColor
+        let textWidth = width - inset - 12
+        let textHeight = ceil(field.cell!.cellSize(forBounds: NSRect(
+            x: 0, y: 0, width: textWidth, height: .greatestFiniteMagnitude)).height)
+        field.frame = NSRect(x: inset, y: 3, width: textWidth, height: textHeight)
+
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: textHeight + 6))
+        row.addSubview(field)
+        let item = NSMenuItem(title: field.stringValue, action: nil, keyEquivalent: "")
+        item.view = row
+        return item
     }
 
     // MARK: Actions
