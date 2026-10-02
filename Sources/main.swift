@@ -34,8 +34,29 @@ struct Limit {
     let label: String
     let percent: Int
     let reset: String?
+    /// The reset as an instant and the length of the window it closes, when
+    /// both are known; together they say how much of the window has gone by.
+    var resetsAt: Date? = nil
+    var window: TimeInterval? = nil
 
     var isSession: Bool { label.lowercased().contains("session") }
+
+    /// Share of the window already elapsed, 0…1. Set beside `percent`, usage
+    /// above this line is running ahead of the clock.
+    func elapsedFraction(at now: Date = Date()) -> Double? {
+        guard let resetsAt, let window, window > 0 else { return nil }
+        return max(0, min(1, 1 - resetsAt.timeIntervalSince(now) / window))
+    }
+
+    /// "4d 23h", "1h 12m", "8m".
+    func timeLeft(at now: Date = Date()) -> String? {
+        guard let seconds = resetsAt?.timeIntervalSince(now), seconds > 0 else { return nil }
+        let minutes = max(1, Int((seconds / 60).rounded()))
+        let days = minutes / 1440, hours = minutes % 1440 / 60, mins = minutes % 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(mins)m" }
+        return "\(mins)m"
+    }
 }
 
 struct Report {
@@ -217,6 +238,47 @@ enum UsageReader {
         return String(reset.dropLast(suffix.count))
     }
 
+    /// "Oct 2 at 3:30pm (Atlantic/Canary)", "Oct 2 at 4pm", "Jan 3, 2027 at 9am"
+    /// or a bare "3:30pm". The year, when missing, is whichever puts the reset
+    /// nearest to now: resets are always days away, never months.
+    static func parseReset(_ text: String, now: Date = Date()) -> Date? {
+        let pattern = try! NSRegularExpression(
+            pattern: #"^(?:([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?\s+at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?$"#,
+            options: [.caseInsensitive])
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let match = pattern.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
+        else { return nil }
+        func group(_ i: Int) -> String? {
+            Range(match.range(at: i), in: trimmed).map { String(trimmed[$0]) }
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = group(7).flatMap(TimeZone.init(identifier:)) ?? .current
+
+        guard var hour = group(4).flatMap(Int.init), (1...12).contains(hour) else { return nil }
+        hour %= 12
+        if group(6)?.lowercased() == "pm" { hour += 12 }
+        let minute = group(5).flatMap(Int.init) ?? 0
+
+        guard let monthName = group(1)?.lowercased() else {
+            // Time only: today, or tomorrow once today's has clearly passed.
+            guard let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now)
+            else { return nil }
+            return today < now.addingTimeInterval(-3600)
+                ? calendar.date(byAdding: .day, value: 1, to: today) : today
+        }
+
+        let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        guard let month = months.firstIndex(of: monthName).map({ $0 + 1 }),
+              let day = group(2).flatMap(Int.init) else { return nil }
+        let thisYear = calendar.component(.year, from: now)
+        let years = group(3).flatMap(Int.init).map { [$0] } ?? [thisYear - 1, thisYear, thisYear + 1]
+        return years
+            .compactMap { calendar.date(from: DateComponents(year: $0, month: month, day: day,
+                                                             hour: hour, minute: minute)) }
+            .min { abs($0.timeIntervalSince(now)) < abs($1.timeIntervalSince(now)) }
+    }
+
     static func parse(_ text: String) -> Report {
         var report = Report()
         report.raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -237,8 +299,13 @@ enum UsageReader {
                     return String(line[r]).trimmingCharacters(in: .whitespaces)
                 }
                 if let label = group(1), let percent = group(2).flatMap(Int.init) {
+                    let lowered = label.lowercased()
+                    let window: TimeInterval? = lowered.contains("session") ? 5 * 3600
+                        : lowered.contains("week") ? 7 * 86_400 : nil
                     report.limits.append(Limit(label: label, percent: percent,
-                                               reset: group(3).map(trimLocalTimeZone)))
+                                               reset: group(3).map(trimLocalTimeZone),
+                                               resetsAt: group(3).flatMap { parseReset($0) },
+                                               window: window))
                 }
                 continue
             }
@@ -392,13 +459,14 @@ enum CodexReader {
         else if let minutes, minutes == 10_080 { label = "Weekly limit" }
         else if let minutes { label = "\(minutes)-minute limit" }
         else { label = fallbackLabel }
-        let reset = (object["resetsAt"] as? NSNumber).map {
+        let resetsAt = (object["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        let reset = resetsAt.map {
             let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .short
-            return formatter.string(from: Date(timeIntervalSince1970: $0.doubleValue))
+            formatter.setLocalizedDateFormatFromTemplate("MMMdjmm")
+            return formatter.string(from: $0)
         }
-        return Limit(label: label, percent: percent, reset: reset)
+        return Limit(label: label, percent: percent, reset: reset,
+                     resetsAt: resetsAt, window: minutes.map { TimeInterval($0 * 60) })
     }
 }
 
@@ -650,6 +718,124 @@ let alertThreshold = 85
 extension NSColor {
     static func forUsage(_ percent: Int) -> NSColor {
         percent > alertThreshold ? .systemRed : .labelColor
+    }
+}
+
+/// A capsule gauge drawn to the geometry and colours of AppKit's mini progress
+/// bar, so limit rows and model rows read as one family, but with a fill of
+/// our choosing: the accent, red past the alert threshold, grey for time.
+final class CapsuleBar: NSView {
+    var fraction: Double = 0 { didSet { needsDisplay = true } }
+    var fill: NSColor = .controlAccentColor { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let radius = bounds.height / 2
+            let track = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25),
+                                     xRadius: radius - 0.25, yRadius: radius - 0.25)
+            NSColor.labelColor.withAlphaComponent(0.07).setFill()
+            track.fill()
+            NSColor.labelColor.withAlphaComponent(0.12).setStroke()
+            track.lineWidth = 0.5
+            track.stroke()
+
+            let clamped = max(0, min(1, fraction))
+            guard clamped > 0 else { return }
+            // Any usage at all shows at least a dot, never an empty track.
+            let width = max(bounds.height, bounds.width * clamped)
+            fill.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: width, height: bounds.height),
+                         xRadius: radius, yRadius: radius).fill()
+        }
+    }
+}
+
+/// One limit as a menu row: its name and usage over a usage bar, and right
+/// beneath it a grey bar of how much of the limit's window has already gone
+/// by, captioned with the time left. Usage longer than the clock is running
+/// ahead of the reset.
+enum LimitRow {
+    static let width: CGFloat = 250
+
+    static func view(for limit: Limit, now: Date = Date()) -> NSView {
+        let inset: CGFloat = 12
+        let barHeight: CGFloat = 6
+        let elapsed = limit.elapsedFraction(at: now)
+        let smallFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let smallDigits = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+
+        var caption: [String] = []
+        if elapsed != nil { caption.append(limit.timeLeft(at: now).map { "\($0) left" } ?? "resetting now") }
+        if let reset = limit.reset { caption.append("resets \(reset)") }
+
+        // Laid out bottom-up: caption, clock bar, usage bar, title.
+        let height: CGFloat = (caption.isEmpty ? 0 : 18) + (elapsed == nil ? 0 : barHeight + 3)
+            + barHeight + 30
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        var y: CGFloat = 4
+
+        if !caption.isEmpty {
+            let text = label(caption.joined(separator: " · "), font: smallFont, color: .secondaryLabelColor)
+            text.frame = NSRect(x: inset, y: y, width: width - 2 * inset - 40, height: 14)
+            text.lineBreakMode = .byTruncatingTail
+            row.addSubview(text)
+            if let elapsed {
+                let share = label("\(Int((elapsed * 100).rounded()))%", font: smallDigits,
+                                  color: .secondaryLabelColor)
+                share.frame = NSRect(x: width - inset - 40, y: y, width: 40, height: 14)
+                share.alignment = .right
+                row.addSubview(share)
+            }
+            y += 18
+        }
+
+        if let elapsed {
+            let clock = CapsuleBar(frame: NSRect(x: inset, y: y, width: width - 2 * inset, height: barHeight))
+            clock.fraction = elapsed
+            clock.fill = .tertiaryLabelColor
+            row.addSubview(clock)
+            y += barHeight + 3
+        }
+
+        let usage = CapsuleBar(frame: NSRect(x: inset, y: y, width: width - 2 * inset, height: barHeight))
+        usage.fraction = Double(limit.percent) / 100
+        usage.fill = limit.percent > alertThreshold ? .systemRed : .controlAccentColor
+        row.addSubview(usage)
+        y += barHeight + 5
+
+        let name = label(limit.label.prefix(1).uppercased() + limit.label.dropFirst(),
+                         font: .systemFont(ofSize: NSFont.systemFontSize), color: .labelColor)
+        name.frame = NSRect(x: inset, y: y, width: width - 2 * inset - 50, height: 17)
+        name.lineBreakMode = .byTruncatingTail
+        row.addSubview(name)
+
+        let percent = label("\(limit.percent)%",
+                            font: .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+                            color: .forUsage(limit.percent))
+        percent.frame = NSRect(x: width - inset - 50, y: y, width: 50, height: 17)
+        percent.alignment = .right
+        row.addSubview(percent)
+
+        var summary = "\(name.stringValue), \(limit.percent)% used"
+        if let elapsed {
+            let share = Int((elapsed * 100).rounded())
+            summary += "; \(share)% of the window has passed"
+            row.toolTip = "Top bar: \(limit.percent)% of the limit used.\n"
+                + "Grey bar: \(share)% of the window has passed.\n"
+                + "Usage ahead of the grey bar is outpacing the clock."
+        }
+        if let reset = limit.reset { summary += "; resets \(reset)" }
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.group)
+        row.setAccessibilityLabel(summary)
+        return row
+    }
+
+    private static func label(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        field.textColor = color
+        return field
     }
 }
 
@@ -963,12 +1149,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(.separator())
             }
 
-            for limit in report.limits {
-                menu.addItem(gaugeItem(for: limit))
-                if let reset = limit.reset {
-                    menu.addItem(info("      resets \(reset)", small: true))
-                }
-            }
+            for limit in report.limits { addLimitRows(limit, to: menu) }
 
             if !report.contributing.isEmpty {
                 menu.addItem(.separator())
@@ -990,10 +1171,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let plan = report.plan.map { " · \($0.capitalized)" } ?? ""
             menu.addItem(info("Codex\(plan)", small: true, muted: true))
             menu.addItem(.separator())
-            for limit in report.limits {
-                menu.addItem(gaugeItem(for: limit))
-                if let reset = limit.reset { menu.addItem(info("      resets \(reset)", small: true)) }
-            }
+            for limit in report.limits { addLimitRows(limit, to: menu) }
             if let credits = report.credits, credits != "0" {
                 menu.addItem(.separator())
                 menu.addItem(info("Credits remaining: \(credits)"))
@@ -1049,29 +1227,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "Refresh Now (updated \(formatter.string(from: date)))"
     }
 
-    /// A label, a block gauge and the percentage, aligned by a monospaced font.
-    private func gaugeItem(for limit: Limit) -> NSMenuItem {
-        let label = limit.label.prefix(1).uppercased() + limit.label.dropFirst()
-        let padded = label.padding(toLength: max(20, label.count + 1), withPad: " ", startingAt: 0)
-        let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-
-        let filled = Bar.filledCount(limit.percent)
-        let text = NSMutableAttributedString(string: padded, attributes: [
-            .font: font, .foregroundColor: NSColor.labelColor,
-        ])
-        text.append(NSAttributedString(string: String(repeating: "█", count: filled), attributes: [
-            .font: font, .foregroundColor: NSColor.forUsage(limit.percent),
-        ]))
-        text.append(NSAttributedString(string: String(repeating: "░", count: Bar.width - filled), attributes: [
-            .font: font, .foregroundColor: NSColor.tertiaryLabelColor,
-        ]))
-        text.append(NSAttributedString(string: String(format: " %3d%%", limit.percent), attributes: [
-            .font: font, .foregroundColor: NSColor.forUsage(limit.percent),
-        ]))
-
+    private func addLimitRows(_ limit: Limit, to menu: NSMenu) {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.attributedTitle = text
-        return item
+        item.view = LimitRow.view(for: limit)
+        menu.addItem(item)
     }
 
     /// Two-line model row: a readable name and share above a native progress
@@ -1313,16 +1472,23 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--login-item") {
     exit(0)
 }
 
+func printLimit(_ limit: Limit) {
+    var line = "\(limit.label): \(limit.percent)% \(Bar.render(limit.percent))"
+    if let reset = limit.reset { line += " · resets \(reset)" }
+    if let elapsed = limit.elapsedFraction() {
+        let percent = Int((elapsed * 100).rounded())
+        line += "\n  \(limit.timeLeft() ?? "0m") left: \(percent)% \(Bar.render(percent)) of window elapsed"
+    }
+    print(line)
+}
+
 if CommandLine.arguments.contains("--print") {
     let semaphore = DispatchSemaphore(value: 0)
     var code: Int32 = 0
     UsageReader.fetch { result in
         switch result {
         case .success(let report):
-            for limit in report.limits {
-                print("\(limit.label): \(limit.percent)% \(Bar.render(limit.percent))"
-                      + (limit.reset.map { " · resets \($0)" } ?? ""))
-            }
+            report.limits.forEach(printLimit)
         case .failure(let error):
             FileHandle.standardError.write(Data("AIUsageMonitor: \(error.message)\n".utf8))
             code = 1
@@ -1341,10 +1507,7 @@ if CommandLine.arguments.contains("--print-codex") {
     CodexReader.fetch { result in
         switch result {
         case .success(let report):
-            for limit in report.limits {
-                print("\(limit.label): \(limit.percent)% \(Bar.render(limit.percent))"
-                      + (limit.reset.map { " · resets \($0)" } ?? ""))
-            }
+            report.limits.forEach(printLimit)
         case .failure(let error):
             FileHandle.standardError.write(Data("AIUsageMonitor: \(error.message)\n".utf8))
             code = 1

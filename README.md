@@ -32,10 +32,15 @@ It is the macOS counterpart of the Claude usage module in Omarchy's waybar.
 ```
 Claude Code · subscription
 ──────────────────────────────────────
-Session             ████░░░░░░   43%
-      resets Aug 28 at 8:59pm
-Week (all models)   █░░░░░░░░░    5%
-      resets Sep 4 at 3:59pm
+Session                             43%
+████████████████░░░░░░░░░░░░░░░░░░░░
+███████████████████████████░░░░░░░░░
+1h 12m left · resets Aug 28 at 8:59pm 76%
+
+Week (all models)                    5%
+██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+██████████░░░░░░░░░░░░░░░░░░░░░░░░░░
+4d 23h left · resets Sep 4 at 3:59pm 29%
 ──────────────────────────────────────
 Model token share · last 7 days
 claude-opus-4-1                     62%
@@ -65,6 +70,12 @@ Quit AI Usage Monitor                ⌘Q
   open the menu and whenever the Mac wakes from sleep.
 - **Copy Report** — the raw `/usage` text on the clipboard.
 
+Each limit gets two capsule bars drawn like the model bars: usage on top, in the system
+accent colour (red past 85%), and beneath it a grey clock bar with the share of that limit's
+window (5 hours or 7 days) that has already gone by, captioned with the time left until it resets.
+Read the pair together: a usage bar longer than its clock bar means you are spending faster
+than the window is passing; a shorter one means you have room to spare.
+
 Every limit row the CLI reports is rendered, so a plan that reports a separate Opus weekly
 cap gets its own gauge without any change here.
 
@@ -78,7 +89,7 @@ Claude Code's daily model totals in `stats-cache.json`.
 Two headless entry points, for scripts:
 
 ```sh
-/Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --print            # limits to stdout
+/Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --print            # limits and window elapsed to stdout
 /Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --print-codex      # Codex limits
 /Applications/AIUsageMonitor.app/Contents/MacOS/AIUsageMonitor --login-item on    # or off / status
 ```
@@ -123,6 +134,13 @@ your subscription limits over the same authenticated connection the CLI already 
 spends no tokens — the poll does not show up in the numbers it is reporting. The app runs
 that command, parses the `Current …: N% used · resets …` lines with one regular expression,
 and draws them.
+
+The clock bars need each reset as an instant and the length of its window. Claude only
+quotes the reset as text (`Oct 2 at 3:30pm (Atlantic/Canary)`), so the app reads it in the
+quoted timezone and, when the year is missing, picks the year that puts the reset nearest to
+now. The window comes from the row's label: a session is 5 hours, a week 7 days. Codex
+reports both directly (`resetsAt` and `windowDurationMins`). A row whose reset can't be read
+keeps its usage bar and simply goes without a clock bar.
 
 Nothing else happens in the background: between refreshes the app is an idle timer and a
 status item. It never reads your credentials — each CLI holds those — and it talks to no
