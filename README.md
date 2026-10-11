@@ -9,12 +9,15 @@ A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight.
 `claude -p /usage` and reads Codex's authenticated local app-server usage snapshot for you.
 
 <p align="center">
-  <img src="docs/menubar.png" width="360"
-        alt="AI Usage Monitor in the macOS menu bar: a gauge icon followed by the session and weekly usage percentages">
+  <img src="docs/menubar.png" width="156"
+        alt="AI Usage Monitor in the macOS menu bar: a gauge icon beside two stacked percentages, session on top and week below">
 </p>
 
-The number sits in the system's own label colour, so it reads like every other menu bar
-item in both light and dark mode. It turns red only past 85% — the one moment the number
+The item is two rows of small figures beside the gauge, session on top and week below, so
+both limits fit in about 50 points of menu bar. A single figure (session or week only) sits
+centred. The figures keep a fixed "100%" column, so the item never changes width as the
+numbers move. It is drawn as a template image and tinted by the menu bar like every other
+item, in light and dark mode; a figure turns red only past 85% — the one moment the number
 is actually news.
 
 ## Why
@@ -68,7 +71,8 @@ Quit AI Usage Monitor                ⌘Q
 
 - **Settings…** — enable or disable monitoring per provider (Claude Code and Codex). A
   disabled provider stops being polled and disappears from the menu bar, tab and report.
-- **Menu Bar Shows** — session percentage (default), week, both, or icon only.
+- **Menu Bar Shows** — session percentage (default), week, both (stacked, session on top),
+  or icon only.
 - **Refresh Every** — 1, 5 (default), 15, 30 or 60 minutes. It also refreshes whenever you
   open the menu and whenever the Mac wakes from sleep.
 - **Copy Report** — the raw `/usage` text on the clipboard.

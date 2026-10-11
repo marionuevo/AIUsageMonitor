@@ -839,6 +839,98 @@ enum LimitRow {
     }
 }
 
+// MARK: - Menu bar image
+
+/// The menu bar read-out, laid out like MinimalStats so the two sit side by
+/// side as one family: the gauge at the full height of two stacked rows of
+/// SF 10.5 pt figures (baselines 10 pt apart), session on top and week below.
+/// A single figure is centred on its own. Figures get a fixed "100%" column,
+/// so the item never changes width as the numbers move.
+enum MenuBarImage {
+    struct Value {
+        let text: String
+        let alert: Bool
+
+        static func plain(_ text: String) -> Value { Value(text: text, alert: false) }
+    }
+
+    private static let height = NSStatusBar.system.thickness
+    private static let font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+    private static let lineGap: CGFloat = 10, iconGap: CGFloat = 3
+    private static let valueWidth = ceil(("100%" as NSString).size(withAttributes: [.font: font]).width)
+    // The digits of both rows (bottom baseline to the top row's cap height)
+    // are centred in the bar, and the gauge fills that same band.
+    private static let bottomBaseline = halfPoint((height - lineGap - font.capHeight) / 2)
+    private static let singleBaseline = halfPoint((height - font.capHeight) / 2)
+    private static let iconHeight = lineGap + font.capHeight
+    private static let symbol = ["gauge.with.dots.needle.bot.50percent", "gauge.medium", "gauge"].lazy
+        .compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: "AI usage") }
+        .first
+
+    /// The symbol's ink inside its frame, which SF Symbols pad on every side;
+    /// measured once so it is the ink, not the frame, that fills the band.
+    private static let symbolInk: NSRect = {
+        guard let symbol else { return .zero }
+        let scale: CGFloat = 8
+        let w = Int(symbol.size.width * scale), h = Int(symbol.size.height * scale)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return NSRect(origin: .zero, size: symbol.size) }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        symbol.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
+        NSGraphicsContext.restoreGraphicsState()
+        var ink = NSRect.null
+        for y in 0..<h {
+            for x in 0..<w where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 {
+                ink = ink.union(NSRect(x: x, y: h - 1 - y, width: 1, height: 1))  // rows run top-down
+            }
+        }
+        guard !ink.isNull else { return NSRect(origin: .zero, size: symbol.size) }
+        return NSRect(x: ink.minX / scale, y: ink.minY / scale, width: ink.width / scale, height: ink.height / scale)
+    }()
+
+    private static func halfPoint(_ v: CGFloat) -> CGFloat { (v * 2).rounded() / 2 }
+
+    /// Template ink as a real colour: black or white for the bar's appearance,
+    /// resolved at draw time.
+    private static let barInk = NSColor(name: nil) {
+        $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .white : .black
+    }
+
+    /// A template image, so the menu bar tints it like its neighbours, unless
+    /// a figure is past the alert threshold: only then is it drawn in colour.
+    static func image(_ values: [Value]) -> NSImage {
+        let iconScale = symbolInk.height > 0 ? iconHeight / symbolInk.height : 0
+        let iconWidth = ceil(symbolInk.width * iconScale)
+        let width = values.isEmpty ? iconWidth : iconWidth + iconGap + valueWidth
+        let tinted = values.contains(where: \.alert)
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            let ink: NSColor = tinted ? barInk : .black
+            if let symbol {
+                let rect = NSRect(x: -symbolInk.minX * iconScale, y: bottomBaseline - symbolInk.minY * iconScale,
+                                  width: symbol.size.width * iconScale, height: symbol.size.height * iconScale)
+                symbol.draw(in: rect)
+                ink.set()
+                rect.fill(using: .sourceAtop)
+            }
+            let baselines = values.count == 1 ? [singleBaseline] : [bottomBaseline + lineGap, bottomBaseline]
+            for (value, baseline) in zip(values, baselines) {
+                // Without .usesLineFragmentOrigin the rect's origin is the baseline.
+                (value.text as NSString).draw(
+                    with: NSRect(x: iconWidth + iconGap, y: baseline, width: valueWidth * 2, height: 0),
+                    options: [],
+                    attributes: [.font: font, .foregroundColor: value.alert ? NSColor.systemRed : ink])
+            }
+            return true
+        }
+        image.isTemplate = !tinted
+        image.accessibilityDescription = "AI usage " + values.map(\.text).joined(separator: ", ")
+        return image
+    }
+}
+
 // MARK: - Controller
 
 final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -894,7 +986,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
         menu.delegate = self
@@ -966,13 +1058,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateButton() {
         guard let button = statusItem.button else { return }
 
-        let names = ["gauge.with.dots.needle.bot.50percent", "gauge.medium", "gauge"]
-        let image = names.lazy
-            .compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: "AI usage") }
-            .first
-        image?.isTemplate = true
-        button.image = image
-
         let service: Service
         if providerEnabled(selectedService) {
             service = selectedService
@@ -982,7 +1067,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             service = first
             UserDefaults.standard.set(service.rawValue, forKey: selectedServiceKey)
         } else {
-            button.attributedTitle = NSAttributedString(string: "")
+            button.image = MenuBarImage.image([])
             button.toolTip = "AI Usage Monitor — all providers are off (see Settings)"
             return
         }
@@ -996,13 +1081,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateClaudeButton(_ button: NSStatusBarButton) {
         switch state {
         case .loading:
-            button.attributedTitle = plainTitle("…")
+            button.image = MenuBarImage.image([.plain("…")])
             button.toolTip = "AI Usage Monitor — reading /usage…"
         case .failed:
-            button.attributedTitle = plainTitle("!")
+            button.image = MenuBarImage.image([.plain("!")])
             button.toolTip = "AI Usage Monitor — could not read /usage (click for details)"
         case .ready(let report):
-            button.attributedTitle = title(for: report)
+            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit))
             button.toolTip = report.limits
                 .map { "\($0.label): \($0.percent)% used" }
                 .joined(separator: "\n")
@@ -1012,50 +1097,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateCodexButton(_ button: NSStatusBarButton) {
         switch codexState {
         case .loading:
-            button.attributedTitle = plainTitle("…")
+            button.image = MenuBarImage.image([.plain("…")])
             button.toolTip = "AI Usage Monitor — reading limits…"
         case .failed:
-            button.attributedTitle = plainTitle("!")
+            button.image = MenuBarImage.image([.plain("!")])
             button.toolTip = "AI Usage Monitor — could not read limits (click for details)"
         case .ready(let report):
-            button.attributedTitle = title(session: report.sessionLimit, week: report.weekLimit)
+            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit))
             button.toolTip = report.limits.map { "\($0.label): \($0.percent)% used" }.joined(separator: "\n")
         }
     }
 
-    private func plainTitle(_ text: String) -> NSAttributedString {
-        NSAttributedString(string: " \(text)", attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
-        ])
-    }
-
-    private func title(for report: Report) -> NSAttributedString {
-        title(session: report.sessionLimit, week: report.weekLimit)
-    }
-
-    private func title(session: Limit?, week: Limit?) -> NSAttributedString {
-
+    private func values(session: Limit?, week: Limit?) -> [MenuBarImage.Value] {
         let pieces: [Limit]
         switch displayMode {
-        case .iconOnly: return NSAttributedString(string: "")
+        case .iconOnly: return []
         case .session:  pieces = [session].compactMap { $0 }
         case .week:     pieces = [week ?? session].compactMap { $0 }
         case .both:     pieces = [session, week].compactMap { $0 }
         }
-
-        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        let result = NSMutableAttributedString(string: " ")
-        for (index, limit) in pieces.enumerated() {
-            if index > 0 {
-                result.append(NSAttributedString(string: " · ", attributes: [
-                    .font: font, .foregroundColor: NSColor.secondaryLabelColor,
-                ]))
-            }
-            result.append(NSAttributedString(string: "\(limit.percent)%", attributes: [
-                .font: font, .foregroundColor: NSColor.forUsage(limit.percent),
-            ]))
-        }
-        return result
+        return pieces.map { MenuBarImage.Value(text: "\($0.percent)%", alert: $0.percent > alertThreshold) }
     }
 
     // MARK: Menu
