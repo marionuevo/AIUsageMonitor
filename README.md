@@ -9,14 +9,15 @@ A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight.
 `claude -p /usage` and reads Codex's authenticated local app-server usage snapshot for you.
 
 <p align="center">
-  <img src="docs/menubar.png" width="156"
-        alt="AI Usage Monitor in the macOS menu bar: a gauge icon beside two stacked percentages, session on top and week below">
+  <img src="docs/menubar.png" width="168"
+        alt="AI Usage Monitor in the macOS menu bar: Clawd, the Claude Code mascot, beside two stacked percentages, session on top and week below">
 </p>
 
-The item is two rows of small figures beside the gauge, session on top and week below, so
-both limits fit in about 50 points of menu bar. A single figure (session or week only) sits
-centred. The figures keep a fixed "100%" column, so the item never changes width as the
-numbers move. It is drawn as a template image and tinted by the menu bar like every other
+The item is two rows of small figures beside an icon, session on top and week below. The
+icon is Clawd, the pixel mascot Claude Code draws at start-up, redrawn from the same
+quadrant blocks; while the Codex tab is selected it is a gauge instead. A single figure
+(session or week only) sits centred. The figures keep a fixed "100%" column, so the item
+never changes width as the numbers move. It is drawn as a template image and tinted by the menu bar like every other
 item, in light and dark mode; a figure turns red only past 85% — the one moment the number
 is actually news.
 
@@ -30,7 +31,7 @@ It is the macOS counterpart of the Claude usage module in Omarchy's waybar.
 
 ## Usage
 
-**Click** the gauge and switch between the **Claude** and **Codex** tabs for either report:
+**Click** the item and switch between the **Claude** and **Codex** tabs for either report:
 
 ```
 Claude Code · subscription

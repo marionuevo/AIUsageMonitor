@@ -842,11 +842,14 @@ enum LimitRow {
 // MARK: - Menu bar image
 
 /// The menu bar read-out, laid out like MinimalStats so the two sit side by
-/// side as one family: the gauge at the full height of two stacked rows of
+/// side as one family: the icon at the full height of two stacked rows of
 /// SF 10.5 pt figures (baselines 10 pt apart), session on top and week below.
 /// A single figure is centred on its own. Figures get a fixed "100%" column,
 /// so the item never changes width as the numbers move.
 enum MenuBarImage {
+    /// Clawd for Claude, the gauge for Codex.
+    enum Icon { case gauge, clawd }
+
     struct Value {
         let text: String
         let alert: Bool
@@ -891,6 +894,19 @@ enum MenuBarImage {
         return NSRect(x: ink.minX / scale, y: ink.minY / scale, width: ink.width / scale, height: ink.height / scale)
     }()
 
+    /// Clawd as Claude Code draws him at start-up, three rows of quadrant
+    /// blocks: each character here is one quadrant, half a terminal cell wide
+    /// and half a cell tall, so a pixel is twice as tall as it is wide.
+    private static let clawd = [
+        ".##############.",
+        "####.######.####",
+        ".##############.",
+        ".##############.",
+        ".#.#........#.#.",
+    ]
+    // Whole device pixels on a Retina bar: 3 × 6 px, 24 × 15 pt in all.
+    private static let clawdPixel = NSSize(width: 1.5, height: 3)
+
     private static func halfPoint(_ v: CGFloat) -> CGFloat { (v * 2).rounded() / 2 }
 
     /// Template ink as a real colour: black or white for the bar's appearance,
@@ -901,14 +917,26 @@ enum MenuBarImage {
 
     /// A template image, so the menu bar tints it like its neighbours, unless
     /// a figure is past the alert threshold: only then is it drawn in colour.
-    static func image(_ values: [Value]) -> NSImage {
+    static func image(_ values: [Value], icon: Icon = .gauge) -> NSImage {
         let iconScale = symbolInk.height > 0 ? iconHeight / symbolInk.height : 0
-        let iconWidth = ceil(symbolInk.width * iconScale)
+        let iconWidth = icon == .clawd
+            ? CGFloat(clawd[0].count) * clawdPixel.width
+            : ceil(symbolInk.width * iconScale)
         let width = values.isEmpty ? iconWidth : iconWidth + iconGap + valueWidth
         let tinted = values.contains(where: \.alert)
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
             let ink: NSColor = tinted ? barInk : .black
-            if let symbol {
+            if icon == .clawd {
+                let height = CGFloat(clawd.count) * clawdPixel.height
+                let top = halfPoint(bottomBaseline + (iconHeight - height) / 2) + height
+                ink.setFill()
+                for (row, line) in clawd.enumerated() {
+                    for (column, pixel) in line.enumerated() where pixel == "#" {
+                        NSRect(x: CGFloat(column) * clawdPixel.width, y: top - CGFloat(row + 1) * clawdPixel.height,
+                               width: clawdPixel.width, height: clawdPixel.height).fill()
+                    }
+                }
+            } else if let symbol {
                 let rect = NSRect(x: -symbolInk.minX * iconScale, y: bottomBaseline - symbolInk.minY * iconScale,
                                   width: symbol.size.width * iconScale, height: symbol.size.height * iconScale)
                 symbol.draw(in: rect)
@@ -1081,13 +1109,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateClaudeButton(_ button: NSStatusBarButton) {
         switch state {
         case .loading:
-            button.image = MenuBarImage.image([.plain("…")])
+            button.image = MenuBarImage.image([.plain("…")], icon: .clawd)
             button.toolTip = "AI Usage Monitor — reading /usage…"
         case .failed:
-            button.image = MenuBarImage.image([.plain("!")])
+            button.image = MenuBarImage.image([.plain("!")], icon: .clawd)
             button.toolTip = "AI Usage Monitor — could not read /usage (click for details)"
         case .ready(let report):
-            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit))
+            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit), icon: .clawd)
             button.toolTip = report.limits
                 .map { "\($0.label): \($0.percent)% used" }
                 .joined(separator: "\n")
