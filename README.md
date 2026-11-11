@@ -15,7 +15,7 @@ A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight.
 
 The item is two rows of small figures beside an icon, session on top and week below. The
 icon is a bot's face, a filled disc with two upright capsule eyes cut out of it, as tall as
-the two rows and no wider; while the Codex tab is selected it is a gauge instead. A single figure
+the two rows and no wider, the same for Claude and Codex. A single figure
 (session or week only) sits centred. The figures keep a fixed "100%" column, so the item
 never changes width as the numbers move. It is drawn as a template image and tinted by the menu bar like every other
 item, in light and dark mode; a figure turns red only past 85% — the one moment the number
@@ -135,8 +135,7 @@ Requires only the Xcode Command Line Tools (`xcode-select --install`) — there 
 project and no package manager. The entire app is one Swift file, `Sources/main.swift`,
 compiled straight into a hand-assembled `.app` bundle by `build.sh`.
 
-Minimum macOS is 13. The gauge glyph is a macOS 14 SF Symbol, so on 13 the icon falls back
-to the plain `gauge`.
+Minimum macOS is 13.
 
 ## How it works
 

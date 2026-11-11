@@ -847,9 +847,6 @@ enum LimitRow {
 /// A single figure is centred on its own. Figures get a fixed "100%" column,
 /// so the item never changes width as the numbers move.
 enum MenuBarImage {
-    /// The bot face for Claude, the gauge for Codex.
-    enum Icon { case gauge, bot }
-
     struct Value {
         let text: String
         let alert: Bool
@@ -862,37 +859,10 @@ enum MenuBarImage {
     private static let lineGap: CGFloat = 10, iconGap: CGFloat = 3
     private static let valueWidth = ceil(("100%" as NSString).size(withAttributes: [.font: font]).width)
     // The digits of both rows (bottom baseline to the top row's cap height)
-    // are centred in the bar, and the gauge fills that same band.
+    // are centred in the bar, and the bot face fills that same band.
     private static let bottomBaseline = halfPoint((height - lineGap - font.capHeight) / 2)
     private static let singleBaseline = halfPoint((height - font.capHeight) / 2)
     private static let iconHeight = lineGap + font.capHeight
-    private static let symbol = ["gauge.with.dots.needle.bot.50percent", "gauge.medium", "gauge"].lazy
-        .compactMap { NSImage(systemSymbolName: $0, accessibilityDescription: "AI usage") }
-        .first
-
-    /// The symbol's ink inside its frame, which SF Symbols pad on every side;
-    /// measured once so it is the ink, not the frame, that fills the band.
-    private static let symbolInk: NSRect = {
-        guard let symbol else { return .zero }
-        let scale: CGFloat = 8
-        let w = Int(symbol.size.width * scale), h = Int(symbol.size.height * scale)
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
-            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-        else { return NSRect(origin: .zero, size: symbol.size) }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        symbol.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
-        NSGraphicsContext.restoreGraphicsState()
-        var ink = NSRect.null
-        for y in 0..<h {
-            for x in 0..<w where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 {
-                ink = ink.union(NSRect(x: x, y: h - 1 - y, width: 1, height: 1))  // rows run top-down
-            }
-        }
-        guard !ink.isNull else { return NSRect(origin: .zero, size: symbol.size) }
-        return NSRect(x: ink.minX / scale, y: ink.minY / scale, width: ink.width / scale, height: ink.height / scale)
-    }()
 
     /// A bot's face: a filled disc the height of the two rows of figures, with
     /// two upright capsule eyes cut out of it so the bar shows through. Sizes
@@ -923,24 +893,15 @@ enum MenuBarImage {
 
     /// A template image, so the menu bar tints it like its neighbours, unless
     /// a figure is past the alert threshold: only then is it drawn in colour.
-    static func image(_ values: [Value], icon: Icon = .gauge) -> NSImage {
-        let iconScale = symbolInk.height > 0 ? iconHeight / symbolInk.height : 0
-        let iconWidth = icon == .bot ? botDiameter : ceil(symbolInk.width * iconScale)
+    static func image(_ values: [Value]) -> NSImage {
+        let iconWidth = botDiameter
         let width = values.isEmpty ? iconWidth : iconWidth + iconGap + valueWidth
         let tinted = values.contains(where: \.alert)
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
             let ink: NSColor = tinted ? barInk : .black
-            if icon == .bot {
-                let y = halfPoint(bottomBaseline + (iconHeight - botDiameter) / 2)
-                ink.setFill()
-                botFace(in: NSRect(x: 0, y: y, width: botDiameter, height: botDiameter)).fill()
-            } else if let symbol {
-                let rect = NSRect(x: -symbolInk.minX * iconScale, y: bottomBaseline - symbolInk.minY * iconScale,
-                                  width: symbol.size.width * iconScale, height: symbol.size.height * iconScale)
-                symbol.draw(in: rect)
-                ink.set()
-                rect.fill(using: .sourceAtop)
-            }
+            let y = halfPoint(bottomBaseline + (iconHeight - botDiameter) / 2)
+            ink.setFill()
+            botFace(in: NSRect(x: 0, y: y, width: botDiameter, height: botDiameter)).fill()
             let baselines = values.count == 1 ? [singleBaseline] : [bottomBaseline + lineGap, bottomBaseline]
             for (value, baseline) in zip(values, baselines) {
                 // Without .usesLineFragmentOrigin the rect's origin is the baseline.
@@ -1107,13 +1068,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateClaudeButton(_ button: NSStatusBarButton) {
         switch state {
         case .loading:
-            button.image = MenuBarImage.image([.plain("…")], icon: .bot)
+            button.image = MenuBarImage.image([.plain("…")])
             button.toolTip = "AI Usage Monitor — reading /usage…"
         case .failed:
-            button.image = MenuBarImage.image([.plain("!")], icon: .bot)
+            button.image = MenuBarImage.image([.plain("!")])
             button.toolTip = "AI Usage Monitor — could not read /usage (click for details)"
         case .ready(let report):
-            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit), icon: .bot)
+            button.image = MenuBarImage.image(values(session: report.sessionLimit, week: report.weekLimit))
             button.toolTip = report.limits
                 .map { "\($0.label): \($0.percent)% used" }
                 .joined(separator: "\n")
