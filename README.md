@@ -9,13 +9,13 @@ A tiny macOS menu bar app that keeps your Claude Code and Codex limits in sight.
 `claude -p /usage` and reads Codex's authenticated local app-server usage snapshot for you.
 
 <p align="center">
-  <img src="docs/menubar.png" width="168"
-        alt="AI Usage Monitor in the macOS menu bar: Clawd, the Claude Code mascot, beside two stacked percentages, session on top and week below">
+  <img src="docs/menubar.png" width="136"
+        alt="AI Usage Monitor in the macOS menu bar: a round bot face with two upright capsule eyes beside two stacked percentages, session on top and week below">
 </p>
 
 The item is two rows of small figures beside an icon, session on top and week below. The
-icon is Clawd, the pixel mascot Claude Code draws at start-up, redrawn from the same
-quadrant blocks; while the Codex tab is selected it is a gauge instead. A single figure
+icon is a bot's face, a filled disc with two upright capsule eyes cut out of it, as tall as
+the two rows and no wider; while the Codex tab is selected it is a gauge instead. A single figure
 (session or week only) sits centred. The figures keep a fixed "100%" column, so the item
 never changes width as the numbers move. It is drawn as a template image and tinted by the menu bar like every other
 item, in light and dark mode; a figure turns red only past 85% — the one moment the number
