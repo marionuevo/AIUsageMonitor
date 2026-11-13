@@ -62,7 +62,6 @@ struct Limit {
 struct Report {
     var headline: String?
     var limits: [Limit] = []
-    var contributing: [String] = []
     var modelUsage = ModelUsageReport()
     var raw: String = ""
     var fetchedAt = Date()
@@ -287,7 +286,6 @@ enum UsageReader {
         let limitPattern = try! NSRegularExpression(
             pattern: #"^Current\s+(.+?):\s*(\d+)%\s*used(?:\s*·\s*resets\s*(.+))?$"#)
 
-        var inContributing = false
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty { continue }
@@ -310,17 +308,10 @@ enum UsageReader {
                 continue
             }
 
+            // The "What's contributing" commentary is left out on purpose: the
+            // menu shows the limits and the model mix, not the CLI's prose.
             if line.hasPrefix("You are currently using") {
                 report.headline = line
-            } else if line.hasPrefix("What's contributing") {
-                inContributing = true
-            } else if inContributing {
-                // Skip the small-print caveat, keep the figures. The leading
-                // whitespace is kept: it is what sets the bullets under their
-                // heading once they are menu rows.
-                if line.hasPrefix("Approximate,") { continue }
-                report.contributing.append(
-                    rawLine.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression))
             }
         }
         return report
@@ -1199,13 +1190,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             for limit in report.limits { addLimitRows(limit, to: menu) }
 
-            if !report.contributing.isEmpty {
-                menu.addItem(.separator())
-                // Unindented lines head the section; the indented ones are its figures.
-                for line in report.contributing {
-                    menu.addItem(wrappedInfo(line, heading: !line.hasPrefix(" ")))
-                }
-            }
             addModelUsageSection(report.modelUsage, to: menu)
         }
     }
